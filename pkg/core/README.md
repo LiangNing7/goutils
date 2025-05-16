@@ -146,7 +146,7 @@ func WriteResponse(c *gin.Context, data any, err error) {
 **Usage**：只展示使用例子，具体结构体未展现。
 
 ```go
-import "github.com/onexstack/onexstack/pkg/core"
+import "github.com/LiangNing7/goutils/pkg/core"
 
 core.WriteResponse(c, apiv1.HealthzResponse{
     Status:    apiv1.ServiceStatus_Healthy,
@@ -204,7 +204,7 @@ func OnInitialize(configFile *string, envPrefix string, loadDirs []string, defau
 **Usage**：一般用于启动应用程序。
 
 ```go
-import "github.com/onexstack/onexstack/pkg/core"
+import "github.com/LiangNing7/goutils/pkg/core"
 
 // NewCommand 创建一个 *cobra.Command 对象，用于启动应用程序.
 func NewCommand() *cobra.Command {

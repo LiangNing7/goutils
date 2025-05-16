@@ -10,7 +10,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// ErrorX 定义了 OneX 项目体系中使用的错误类型，用于描述错误的详细信息.
+// ErrorX 定义了项目体系中使用的错误类型，用于描述错误的详细信息.
 type ErrorX struct {
 	// Code 表示错误的 HTTP 状态码，用于与客户端进行交互时标识错误的类型.
 	Code int `json:"code,omitempty"`

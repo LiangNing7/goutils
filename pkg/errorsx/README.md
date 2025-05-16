@@ -12,7 +12,7 @@
 项目的错误包命名为 errorsx，为保持命名一致性，定义了一个名为 ErrorX 的结构体，用于描述错误信息，具体定义如下：`pkg/errorsx/errorsx.go`
 
 ```go
-// ErrorX 定义了 OneX 项目体系中使用的错误类型，用于描述错误的详细信息.
+// ErrorX 定义了项目体系中使用的错误类型，用于描述错误的详细信息.
 type ErrorX struct {
     // Code 表示错误的 HTTP 状态码，用于与客户端进行交互时标识错误的类型.
     Code int `json:"code,omitempty"`
