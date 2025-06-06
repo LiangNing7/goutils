@@ -29,7 +29,7 @@ import (
 	"embed"
 	"fmt"
 	"golang.org/x/text/language"
-	"github.com/onexstack/onexstack/pkg/i18n"
+	"github.com/LiangNing7/goutils/pkg/i18n"
 )
 
 //go:embed locales
