@@ -31,6 +31,7 @@ require (
 	github.com/nicksnyder/go-i18n/v2 v2.6.0
 	github.com/redis/go-redis/extra/rediscensus/v9 v9.8.0
 	github.com/redis/go-redis/v9 v9.8.0
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/segmentio/kafka-go v0.4.48
 	github.com/sony/sonyflake v1.2.1
 	github.com/spf13/cobra v1.8.1
