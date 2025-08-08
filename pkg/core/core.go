@@ -47,6 +47,12 @@ func HandleRequest[T any, R any](c *gin.Context, binder Binder, handler Handler[
 	WriteResponse(c, response, err)
 }
 
+// HandleEmptyRequest 是处理空请求的快捷函数.
+func HandleEmptyRequest[T any, R any](c *gin.Context, handler Handler[T, R], validators ...Validator[T]) {
+	emptyBinder := func(_ any) error { return nil }
+	HandleRequest(c, emptyBinder, handler, validators...)
+}
+
 // HandleJSONRequest 是处理 JSON 请求的快捷函数.
 func HandleJSONRequest[T any, R any](c *gin.Context, handler Handler[T, R], validators ...Validator[T]) {
 	HandleRequest(c, c.ShouldBindJSON, handler, validators...)
