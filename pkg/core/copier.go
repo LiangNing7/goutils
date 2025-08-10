@@ -1,17 +1,20 @@
 package core
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
 	"github.com/jinzhu/copier"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"gorm.io/datatypes"
 )
 
-// TypeConverters 定义时间类型转换器，用于 copier 的深度拷贝.
-// 主要用于在 Go 原生的 time.Time 与 Protobuf 内置的 Timestamp 之间进行相互转换.
+// TypeConverters 定义自定义转换器，用于 copier 的深度拷贝.
 func TypeConverters() []copier.TypeConverter {
 	return []copier.TypeConverter{
+		// 主要用于在 Go 原生的 time.Time 与 Protobuf 内置的 Timestamp 之间进行相互转换.
 		{
 			// 源类型为 time.Time，目标类型为 *timestamppb.Timestamp.
 			SrcType: time.Time{},
@@ -36,6 +39,46 @@ func TypeConverters() []copier.TypeConverter {
 					return nil, errors.New("source type not matching")
 				}
 				return s.AsTime(), nil
+			},
+		},
+
+		// 主要用于在 GORM 中的 datatypes.JSON 与 Protobuf 的 *structpb.Struct 之间进行互相转换.
+		{
+			SrcType: datatypes.JSON{},
+			DstType: &structpb.Struct{},
+			Fn: func(src any) (any, error) {
+				s, ok := src.(datatypes.JSON)
+				if !ok {
+					return nil, errors.New("source type not matching")
+				}
+
+				// 先转成 map[string]interface{}
+				var m map[string]any
+				if err := json.Unmarshal(s, &m); err != nil {
+					return nil, err
+				}
+
+				// 再构造 structpb.Struct
+				return structpb.NewStruct(m)
+			},
+		},
+		{
+			SrcType: &structpb.Struct{},
+			DstType: datatypes.JSON{},
+			Fn: func(src any) (any, error) {
+				s, ok := src.(*structpb.Struct)
+				if !ok {
+					return nil, errors.New("source type not matching")
+				}
+
+				// 先转为 JSON 字符串
+				b, err := json.Marshal(s.AsMap())
+				if err != nil {
+					return nil, err
+				}
+
+				// 再转成 datatypes.JSON
+				return datatypes.JSON(b), nil
 			},
 		},
 	}
