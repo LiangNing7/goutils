@@ -84,7 +84,7 @@ func TypeConverters() []copier.TypeConverter {
 	}
 }
 
-// CopyWithConverters 使用自定义转换器，支持深拷贝并忽略零值字段.
+// CopyWithConverters 使用默认转换器，支持深拷贝并忽略零值字段.
 // to: 目标结构体指针; from: 源结构体指针.
 func CopyWithConverters(to any, from any) error {
 	return copier.CopyWithOption(
@@ -94,6 +94,21 @@ func CopyWithConverters(to any, from any) error {
 			IgnoreEmpty: true,             // 忽略源中空值字段.
 			DeepCopy:    true,             // 启用深度拷贝.
 			Converters:  TypeConverters(), // 应用自定义类型转换器
+		})
+}
+
+// CopyWithCustomConverters 使用自定义转换器.
+// to: 目标结构体指针; from: 源结构体指针；customConverters 自定义转换器.
+func CopyWithCustomConverters(to any, from any, customConverters []copier.TypeConverter) error {
+	defaultConverters := TypeConverters()
+	customConverters = append(customConverters, defaultConverters...)
+	return copier.CopyWithOption(
+		to,
+		from,
+		copier.Option{
+			IgnoreEmpty: true,             // 忽略源中空值字段.
+			DeepCopy:    true,             // 启用深度拷贝.
+			Converters:  customConverters, // 应用自定义类型转换器
 		})
 }
 
