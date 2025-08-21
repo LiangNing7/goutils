@@ -3,6 +3,8 @@ package core
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/jinzhu/copier"
@@ -115,4 +117,32 @@ func CopyWithCustomConverters(to any, from any, customConverters []copier.TypeCo
 // Copy 普通拷贝，不应用自定义转换，只做浅拷贝并赋值同名字段.
 func Copy(to any, from any) error {
 	return copier.Copy(to, from)
+}
+
+// CopyValueWithCustomConverters 将 from 的值根据 converters 中定义的转换规则
+// 转换后赋值给 to 指向的变量。
+//
+// 参数说明：
+//   - to:        目标值的指针 (例如 *string)，用于接收转换后的结果。
+//     必须是指针，否则无法通过反射赋值。
+//   - from:      源值 (例如 string 或 UserRole)，类型必须和 converters 中的 SrcType 匹配。
+//   - converters: 自定义转换器。
+//
+// 返回值：
+//   - error: 转换成功时为 nil；若未找到合适的转换器或转换失败，则返回错误。
+func CopyValueWithCustomConverters(to any, from any, converters []copier.TypeConverter) error {
+	dstType := reflect.TypeOf(to).Elem() // 指针指向的类型
+	srcType := reflect.TypeOf(from)
+
+	for _, c := range converters {
+		if c.SrcType == srcType && c.DstType == dstType {
+			v, err := c.Fn(from)
+			if err != nil {
+				return err
+			}
+			reflect.ValueOf(to).Elem().Set(reflect.ValueOf(v))
+			return nil
+		}
+	}
+	return fmt.Errorf("no converter found for %v -> %v", srcType, dstType)
 }
