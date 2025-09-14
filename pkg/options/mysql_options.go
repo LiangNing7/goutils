@@ -68,7 +68,7 @@ func (o *MySQLOptions) AddFlags(fs *pflag.FlagSet, prefixes ...string) {
 
 // DSN return DSN from MySQLOptions.
 func (o *MySQLOptions) DSN() string {
-	return fmt.Sprintf(`%s:%s@tcp(%s)/%s?charset=utf8&parseTime=%t&loc=%s`,
+	return fmt.Sprintf(`%s:%s@tcp(%s)/%s?charset=utf8mb4&parseTime=%t&loc=%s`,
 		o.Username,
 		o.Password,
 		o.Addr,
