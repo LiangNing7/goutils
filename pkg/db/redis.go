@@ -42,6 +42,8 @@ func NewRedis(opts *RedisOptions) (*redis.Client, error) {
 
 	// check redis if is ok
 	if _, err := rdb.Ping(context.Background()).Result(); err != nil {
+		// 连接不可用时关闭客户端，避免连接池/后台 goroutine 泄漏.
+		_ = rdb.Close()
 		return nil, err
 	}
 
