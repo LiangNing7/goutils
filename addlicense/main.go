@@ -118,7 +118,7 @@ func main() {
 	// 则打印帮助信息，并直接退出程序.
 	if *help {
 		pflag.Usage()
-		os.Exit(1)
+		os.Exit(0)
 	}
 
 	// 处理完标志之后，剩余的参数个数，
@@ -161,7 +161,7 @@ func main() {
 		}
 		t, err = template.New("").Parse(string(d))
 		if err != nil {
-			fmt.Printf("licnese file: %v\n", err)
+			fmt.Printf("license file: %v\n", err)
 			os.Exit(1)
 		}
 	} else {
@@ -225,11 +225,21 @@ func main() {
 		}
 	}()
 
+	// 遍历错误（例如路径不存在）必须影响退出码，
+	// 否则调用方会误以为处理成功.
+	// 具体错误信息已由 walk 的回调打印.
+	var walkErr error
 	for _, d := range pflag.Args() {
-		walk(ch, d)
+		if err := walk(ch, d); err != nil {
+			walkErr = err
+		}
 	}
 	close(ch)
 	<-done
+
+	if walkErr != nil {
+		os.Exit(1)
+	}
 }
 
 type file struct {
@@ -252,12 +262,14 @@ func getPatterns(patterns []string) ([]*regexp.Regexp, error) {
 	return patternsRe, nil
 }
 
-func walk(ch chan<- *file, start string) {
-	_ = filepath.Walk(start, func(path string, fi os.FileInfo, err error) error {
+// walk 遍历 start 目录下的所有文件，并将待处理的文件发送到 ch.
+// 遍历过程中出现的错误会被返回，由调用方决定如何影响退出码.
+func walk(ch chan<- *file, start string) error {
+	if err := filepath.Walk(start, func(path string, fi os.FileInfo, err error) error {
 		if err != nil {
 			fmt.Printf("%s error: %v\n", path, err)
 
-			return nil
+			return err
 		}
 		if fi.IsDir() {
 			for _, pattern := range patterns.dirs {
@@ -278,7 +290,11 @@ func walk(ch chan<- *file, start string) {
 		ch <- &file{path, fi.Mode()}
 
 		return nil
-	})
+	}); err != nil {
+		return fmt.Errorf("walk %s failed, %w", start, err)
+	}
+
+	return nil
 }
 
 func addLicense(path string, fmode os.FileMode, tmpl *template.Template, data *copyrightData) (bool, error) {

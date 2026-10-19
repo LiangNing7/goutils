@@ -1,0 +1,76 @@
+name: CI
+
+# 触发：任意分支的 push，以及所有 pull request.
+# 这样每个分支/PR 都会跑一遍构建、vet 与测试，避免依赖漂移长期潜伏.
+on:
+  push:
+  pull_request:
+
+# 最小权限：CI 只需要读取仓库内容.
+permissions:
+  contents: read
+
+# 并发控制：同一分支/PR 上新的运行会取消旧的运行，避免排队浪费.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# -mod=readonly: 保证 CI 不会隐式改写 go.mod / go.sum（构建失败而不是静默改依赖）.
+env:
+  GOFLAGS: -mod=readonly
+
+jobs:
+  # 快速反馈：构建 + 静态检查 + 单元测试，共享同一份 Go 缓存.
+  checks:
+    name: Build / Vet / Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # 直接从 go.mod 读取 Go 版本（当前为 1.24），避免版本漂移.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # 保持严格：不使用 `|| true`，测试失败即 CI 失败.
+      - name: Test
+        run: go test ./...
+
+  # 数据竞态检测单独作为一个 job：
+  # - -race 需要 CGO（ubuntu runner 自带 gcc，可用），编译与运行都更慢；
+  # - 独立 job 便于并行执行，且当 race 失败时能一眼区分于普通测试失败；
+  # - 本仓库历史上存在并发缺陷，把 -race 纳入默认门禁是值得的成本.
+  test-race:
+    name: Test (race)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Test with -race
+        run: go test -race ./...
