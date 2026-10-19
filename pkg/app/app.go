@@ -2,9 +2,12 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -26,6 +29,7 @@ type App struct {
 	shortDesc   string
 	description string
 	run         RunFunc
+	runWithCtx  RunFuncWithContext
 	cmd         *cobra.Command
 	args        cobra.PositionalArgs
 
@@ -51,6 +55,11 @@ type App struct {
 // RunFunc defines the application's startup callback function.
 type RunFunc func() error
 
+// RunFuncWithContext defines the application's startup callback function
+// that receives the command context, so cancellation and deadlines can be
+// propagated to the server for a graceful shutdown.
+type RunFuncWithContext func(ctx context.Context) error
+
 // HealthCheckFunc defines the health check function for the application.
 type HealthCheckFunc func() error
 
@@ -73,6 +82,14 @@ func WithRunFunc(run RunFunc) Option {
 	}
 }
 
+// WithRunFuncWithContext is used to set the application startup callback
+// function option, with the command context passed in.
+func WithRunFuncWithContext(run RunFuncWithContext) Option {
+	return func(app *App) {
+		app.runWithCtx = run
+	}
+}
+
 // WithDescription is used to set the description of the application.
 func WithDescription(desc string) Option {
 	return func(app *App) {
@@ -92,7 +109,16 @@ func WithHealthCheckFunc(fn HealthCheckFunc) Option {
 func WithDefaultHealthCheckFunc() Option {
 	fn := func() HealthCheckFunc {
 		return func() error {
-			go genericoptions.NewHealthOptions().ServeHealthCheck()
+			go func() {
+				defer func() {
+					// 后台协程 panic 会直接崩溃进程，这里兜底记录.
+					if r := recover(); r != nil {
+						log.Errorw(fmt.Errorf("panic: %v", r), "Recovered from panic in health check server")
+					}
+				}()
+
+				genericoptions.NewHealthOptions().ServeHealthCheck()
+			}()
 
 			return nil
 		}
@@ -202,43 +228,67 @@ func (app *App) buildCommand() {
 	cmd.SetErr(os.Stderr)
 	cmd.Flags().SortFlags = true
 
-	var fs *pflag.FlagSet
-	// 方法2：使用type switch
+	var (
+		fs  *pflag.FlagSet
+		fss *cliflag.NamedFlagSets
+	)
 	switch typed := app.options.(type) {
 	case NamedFlagSetOptions:
-		var fss cliflag.NamedFlagSets
+		// 先取用户返回的 NamedFlagSets，再在其上取 "global" FlagSet.
+		// 顺序反了会导致 fs 指向一个不属于命令的孤儿 FlagSet，
+		// 使 --config/-c、--version 无法被解析.
+		named := typed.Flags()
+		fss = &named
 		fs = fss.FlagSet("global")
-
-		if app.options != nil {
-			fss = typed.Flags()
-		}
-
-		for _, f := range fss.FlagSets {
-			cmd.Flags().AddFlagSet(f)
-		}
-
-		cols, _, _ := term.TerminalSize(cmd.OutOrStdout())
-		cliflag.SetUsageAndHelpFunc(cmd, fss, cols)
 	case FlagSetOptions:
 		fs = cmd.PersistentFlags()
-		if app.options != nil {
-			typed.AddFlags(fs)
-		}
+		typed.AddFlags(fs)
 	default:
+		// 未提供 options 时也必须有一个非 nil 的 FlagSet，
+		// 否则 version.AddFlags(fs) 会对 nil map 赋值而 panic.
+		fs = cmd.PersistentFlags()
 	}
 
 	version.AddFlags(fs)
 
 	if !app.noConfig {
-		AddConfigFlag(fs, app.name, app.watch)
+		addConfigFlag(fs, app.name, app.watch, app.options)
+	}
+
+	if fss != nil {
+		// 必须在上面的 version/config flag 注册完成后再 AddFlagSet，
+		// 因为这些 flag 是直接加到 fss 的 "global" 集合上的.
+		for _, f := range fss.FlagSets {
+			cmd.Flags().AddFlagSet(f)
+		}
+
+		cols, _, _ := term.TerminalSize(cmd.OutOrStdout())
+		cliflag.SetUsageAndHelpFunc(cmd, *fss, cols)
 	}
 
 	app.cmd = cmd
 }
 
 // Run is used to launch the application.
+//
+// 它会安装 SIGINT/SIGTERM 处理、在退出前刷新日志，然后以命令的退出码退出进程.
 func (app *App) Run() {
-	os.Exit(cli.Run(app.cmd))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	code := app.RunContext(ctx)
+
+	// 文件 sink 可能带缓冲，退出前刷新，避免丢日志.
+	log.Sync()
+	os.Exit(code)
+}
+
+// RunContext 使用给定的 context 运行应用并返回退出码，不会调用 os.Exit.
+// context 会被传递给 RunFuncWithContext，从而实现优雅退出.
+func (app *App) RunContext(ctx context.Context) int {
+	app.cmd.SetContext(ctx)
+
+	return cli.Run(app.cmd)
 }
 
 func (app *App) runCommand(cmd *cobra.Command, args []string) error {
@@ -286,6 +336,10 @@ func (app *App) runCommand(cmd *cobra.Command, args []string) error {
 	}
 
 	// run application
+	if app.runWithCtx != nil {
+		return app.runWithCtx(cmd.Context())
+	}
+
 	return app.run()
 }
 

@@ -58,20 +58,45 @@ func (s *GRPCServer) RunOrDie() {
 	}
 }
 
+// DefaultGRPCHealthServiceName 是 gRPC 健康检查上报的服务名.
+// 应用可在创建服务器之前覆盖它，从而不再硬编码某个具体应用名.
+var DefaultGRPCHealthServiceName = "MiniBlog"
+
 // GracefulStop 优雅地关闭 GRPC 服务器.
+// 有活跃的流式 RPC 时 GracefulStop 会一直等待，因此这里在 ctx 超时后强制 Stop，
+// 避免进程永久挂起.
 func (s *GRPCServer) GracefulStop(ctx context.Context) {
 	log.Infow("Gracefully stop grpc server")
-	s.srv.GracefulStop()
+
+	stopped := make(chan struct{})
+	go func() {
+		s.srv.GracefulStop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-ctx.Done():
+		log.Warnw("Graceful stop timed out, forcing grpc server to stop", "err", ctx.Err())
+		// 先触发强制停止：它会立即关闭监听和连接，让客户端尽快感知到断开.
+		// 这里不再等待 GracefulStop 返回——对于不响应 ctx 的流式 handler，
+		// 连接要等 handler 退出后才会从连接表移除，等待会让进程无法退出.
+		s.srv.Stop()
+	}
+}
+
+// newHealthServer 创建并配置健康检查服务.
+func newHealthServer() *health.Server {
+	healthServer := health.NewServer()
+
+	// 设定服务的健康状态.
+	healthServer.SetServingStatus(DefaultGRPCHealthServiceName, grpc_health_v1.HealthCheckResponse_SERVING)
+
+	return healthServer
 }
 
 // registerHealthServer 注册健康检查服务.
 func registerHealthServer(grpcsrv *grpc.Server) {
-	// 创建健康检查服务实例
-	healthServer := health.NewServer()
-
-	// 设定服务的健康状态
-	healthServer.SetServingStatus("MiniBlog", grpc_health_v1.HealthCheckResponse_SERVING)
-
 	// 注册健康检查服务
-	grpc_health_v1.RegisterHealthServer(grpcsrv, healthServer)
+	grpc_health_v1.RegisterHealthServer(grpcsrv, newHealthServer())
 }

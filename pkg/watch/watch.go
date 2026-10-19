@@ -1,8 +1,10 @@
 package watch
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -25,6 +27,11 @@ var (
 	// Default expiration time for locks.
 	defaultExpiration = 10 * time.Second
 )
+
+// newLocker 是创建分布式锁构造函数，抽成变量便于测试注入.
+var newLocker = func(db *gorm.DB, opts ...distlock.Option) (distlock.Locker, error) {
+	return distlock.NewGORMLocker(db, opts...)
+}
 
 // Option configures a Watch instance with customizable settings.
 type Option func(w *Watch)
@@ -132,35 +139,81 @@ func (w *Watch) addWatchers() error {
 }
 
 // Start attempts to acquire a distributed lock and starts the Cron job scheduler.
-// It retries acquiring the lock until successful.
+// It retries acquiring the lock until successful, or until stopCh is closed.
 func (w *Watch) Start(stopCh <-chan struct{}) {
 	if w.healthzPort != 0 {
-		go w.serveHealthz()
+		go w.serveHealthz(stopCh)
 	}
 
 	opts := []distlock.Option{
 		distlock.WithLockTimeout(defaultExpiration),
 		distlock.WithLockName(w.lockName),
 	}
-	w.locker, _ = distlock.NewGORMLocker(w.db, opts...)
-	ticker := time.NewTicker(defaultExpiration + (5 * time.Second))
-	ctx := wait.ContextForChannel(stopCh)
-	var err error
-	for {
-		// Obtain a lock for our given mutex. After this is successful, no one else
-		// can obtain the same lock (the same mutex name) until we unlock it.
-		if err := w.locker.Lock(ctx); err == nil {
-			w.logger.Debug("Successfully acquired lock", "lockName", w.lockName)
-			break
-		}
 
-		w.logger.Debug("Failed to acquire lock.", "lockName", w.lockName, "err", err)
-		<-ticker.C
+	locker, err := newLocker(w.db, opts...)
+	if err != nil {
+		// 不能吞掉错误：AutoMigrate 失败时 locker 为 nil，继续走下去会在
+		// w.locker.Lock 时空指针 panic.
+		w.logger.Error(err, "Failed to create distributed locker, watch server will not start", "lockName", w.lockName)
+		return
+	}
+	w.locker = locker
+
+	ctx := wait.ContextForChannel(stopCh)
+	if !w.acquireLock(ctx, stopCh) {
+		w.logger.Info("Watch server was stopped before it started")
+		return
 	}
 
 	w.jm.Start()
 
 	w.logger.Info("Successfully started watch server")
+}
+
+// acquireLock 阻塞等待获取分布式锁：
+//   - 成功获取返回 true；
+//   - 在等待期间收到停机信号返回 false（且不会启动任务）.
+func (w *Watch) acquireLock(ctx context.Context, stopCh <-chan struct{}) bool {
+	ticker := time.NewTicker(defaultExpiration + (5 * time.Second))
+	defer ticker.Stop()
+
+	for {
+		if err := w.locker.Lock(ctx); err == nil {
+			// 拿到锁之后要再确认是否已经请求停机：
+			// 否则会在停机后启动 job 并遗留一条锁记录.
+			select {
+			case <-stopCh:
+				w.releaseLock()
+				return false
+			default:
+			}
+
+			w.logger.Debug("Successfully acquired lock", "lockName", w.lockName)
+			return true
+		} else {
+			w.logger.Debug("Failed to acquire lock.", "lockName", w.lockName, "err", err)
+		}
+
+		// 重试间隔内也要能响应停机信号（GORMLocker.Lock 本身不阻塞）.
+		select {
+		case <-stopCh:
+			return false
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
+}
+
+// releaseLock 释放分布式锁（如果持有）.
+func (w *Watch) releaseLock() {
+	if w.locker == nil {
+		return
+	}
+
+	if err := w.locker.Unlock(context.Background()); err != nil {
+		w.logger.Debug("Failed to release lock", "err", err)
+	}
 }
 
 // Stop blocks until all jobs are completed and releases the distributed lock.
@@ -172,25 +225,67 @@ func (w *Watch) Stop() {
 		w.logger.Error(errors.New("context was not done immediately"), "timeout", jobStopTimeout.String())
 	}
 
+	if w.locker == nil {
+		w.logger.Info("Successfully stopped watch server")
+		return
+	}
+
 	if err := w.locker.Unlock(ctx); err != nil {
 		w.logger.Debug("Failed to release lock", "err", err)
+	}
+
+	// 释放底层资源（例如续租 goroutine、数据库连接）.
+	if closer, ok := w.locker.(interface{ Close() error }); ok {
+		if err := closer.Close(); err != nil {
+			w.logger.Debug("Failed to close locker", "err", err)
+		}
 	}
 
 	w.logger.Info("Successfully stopped watch server")
 }
 
 // serveHealthz starts the health check server for the Watch instance.
-func (w *Watch) serveHealthz() {
+// 健康检查服务器会在 stopCh 关闭后优雅关停.
+func (w *Watch) serveHealthz(stopCh <-chan struct{}) {
+	defer func() {
+		if r := recover(); r != nil {
+			w.logger.Error(fmt.Errorf("panic: %v", r), "Recovered from panic in health check server")
+		}
+	}()
+
 	r := mux.NewRouter()
 	r.HandleFunc("/healthz", healthzHandler).Methods(http.MethodGet)
 
 	address := fmt.Sprintf("0.0.0.0:%d", w.healthzPort)
 
-	if err := http.ListenAndServe(address, r); err != nil {
-		w.logger.Error(err, "Error serving health check endpoint")
+	lis, err := net.Listen("tcp", address)
+	if err != nil {
+		// 只有真正监听失败时才报错，且不再打印 "Successfully started".
+		w.logger.Error(err, "Error serving health check endpoint", "address", address)
+		return
 	}
 
+	srv := &http.Server{
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		<-stopCh
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			w.logger.Error(err, "Failed to shut down health check server")
+		}
+	}()
+
 	w.logger.Info("Successfully started health check server", "address", address)
+
+	if err := srv.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		w.logger.Error(err, "Error serving health check endpoint", "address", address)
+	}
 }
 
 // healthzHandler handles the health check requests for the service.

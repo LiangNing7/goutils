@@ -59,7 +59,9 @@ func (s *KratosServer) GracefulStop(ctx context.Context) {
 }
 
 func NewKratosLogger(id, name, version string) krtlog.Logger {
-	return krtlog.With(log.Default(),
+	// 使用 log.NewKratosLogger() 而不是 log.Default()：后者会在构造期就把
+	// 全局 logger 捕获下来，log.Init 之后仍然在使用旧 logger.
+	return krtlog.With(log.NewKratosLogger(),
 		"ts", krtlog.DefaultTimestamp,
 		"caller", krtlog.DefaultCaller,
 		"service.id", id,
