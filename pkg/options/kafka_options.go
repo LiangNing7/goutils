@@ -1,6 +1,7 @@
 package options
 
 import (
+	"crypto/tls"
 	"fmt"
 	"strings"
 	"time"
@@ -166,9 +167,11 @@ type KafkaOptions struct {
 	TLSOptions    *TLSOptions   `mapstructure:"tls"`
 	SASLMechanism string        `mapstructure:"mechanism"`
 	Username      string        `mapstructure:"username"`
-	Password      string        `mapstructure:"password"`
-	Algorithm     string        `mapstructure:"algorithm"`
-	Compressed    bool          `mapstructure:"compressed"`
+	// Password is never exported: without a json tag json.Marshal emitted a
+	// "Password" key with the cleartext value.
+	Password   string `json:"-" mapstructure:"password"`
+	Algorithm  string `mapstructure:"algorithm"`
+	Compressed bool   `mapstructure:"compressed"`
 
 	// kafka-go writer options
 	WriterOptions WriterOptions `mapstructure:"writer"`
@@ -213,8 +216,12 @@ func (o *KafkaOptions) Validate() []error {
 		errs = append(errs, fmt.Errorf("kafka broker can not be empty"))
 	}
 
-	if !o.TLSOptions.UseTLS && o.SASLMechanism != "" {
-		errs = append(errs, fmt.Errorf("SASL-Mechanism is setted but use_ssl is false"))
+	// TLSOptions may be nil for values decoded from configuration (viper zero
+	// values) or built as a struct literal.
+	if o.TLSOptions == nil || !o.TLSOptions.UseTLS {
+		if o.SASLMechanism != "" {
+			errs = append(errs, fmt.Errorf("SASL-Mechanism is setted but use_ssl is false"))
+		}
 	}
 
 	if !stringsutil.StringIn(strings.ToLower(o.SASLMechanism), []string{"plain", "scram", ""}) {
@@ -233,13 +240,18 @@ func (o *KafkaOptions) Validate() []error {
 		errs = append(errs, fmt.Errorf("--kafka.writer.batch-timeout cannot be negative"))
 	}
 
-	errs = append(errs, o.TLSOptions.Validate()...)
+	if o.TLSOptions != nil {
+		errs = append(errs, o.TLSOptions.Validate()...)
+	}
 
 	return errs
 }
 
-// AddFlags adds flags related to redis storage for a specific APIServer to the specified FlagSet.
+// AddFlags adds flags related to kafka cluster for a specific APIServer to the specified FlagSet.
 func (o *KafkaOptions) AddFlags(fs *pflag.FlagSet, prefixes ...string) {
+	if o.TLSOptions == nil {
+		o.TLSOptions = NewTLSOptions()
+	}
 	o.TLSOptions.AddFlags(fs, "kafka")
 
 	fs.StringSliceVar(&o.Brokers, "kafka.brokers", o.Brokers, "The list of brokers used to discover the partitions available on the kafka cluster.")
@@ -312,9 +324,16 @@ func (o *KafkaOptions) GetMechanism() (sasl.Mechanism, error) {
 }
 
 func (o *KafkaOptions) Dialer() (*kafka.Dialer, error) {
-	tlsConfig, err := o.TLSOptions.TLSConfig()
-	if err != nil {
-		return nil, err
+	// TLSOptions may be nil for values decoded from configuration (viper zero
+	// values) or built as a struct literal.
+	var tlsConfig *tls.Config
+
+	if o.TLSOptions != nil {
+		var err error
+		tlsConfig, err = o.TLSOptions.TLSConfig()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	mechanism, err := o.GetMechanism()

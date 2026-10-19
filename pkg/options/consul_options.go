@@ -30,7 +30,7 @@ func (o *ConsulOptions) Validate() []error {
 	return errs
 }
 
-// AddFlags adds flags related to mysql storage for a specific APIServer to the specified FlagSet.
+// AddFlags adds flags related to consul service registry for a specific APIServer to the specified FlagSet.
 func (o *ConsulOptions) AddFlags(fs *pflag.FlagSet, prefixes ...string) {
 	fs.StringVar(&o.Addr, "consul.addr", o.Addr, ""+
 		"Addr is the address of the consul server.")

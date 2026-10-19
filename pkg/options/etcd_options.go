@@ -14,7 +14,7 @@ type EtcdOptions struct {
 	Endpoints   []string      `json:"endpoints"               mapstructure:"endpoints"`
 	DialTimeout time.Duration `json:"dial-timeout"         mapstructure:"dial-timeout"`
 	Username    string        `json:"username"                mapstructure:"username"`
-	Password    string        `json:"password"                mapstructure:"password"`
+	Password    string        `json:"-"                       mapstructure:"password"`
 	TLSOptions  *TLSOptions   `json:"tls"               mapstructure:"tls"`
 }
 
@@ -39,13 +39,20 @@ func (o *EtcdOptions) Validate() []error {
 		errs = append(errs, fmt.Errorf("--etcd.dial-timeout cannot be negative"))
 	}
 
-	errs = append(errs, o.TLSOptions.Validate()...)
+	// TLSOptions may be nil for values decoded from configuration (viper
+	// zero values) or built as a struct literal.
+	if o.TLSOptions != nil {
+		errs = append(errs, o.TLSOptions.Validate()...)
+	}
 
 	return errs
 }
 
-// AddFlags adds flags related to redis storage for a specific APIServer to the specified FlagSet.
+// AddFlags adds flags related to etcd storage for a specific APIServer to the specified FlagSet.
 func (o *EtcdOptions) AddFlags(fs *pflag.FlagSet, prefixes ...string) {
+	if o.TLSOptions == nil {
+		o.TLSOptions = NewTLSOptions()
+	}
 	o.TLSOptions.AddFlags(fs, "etcd")
 
 	fs.StringSliceVar(&o.Endpoints, "etcd.endpoints", o.Endpoints, "Endpoints of etcd cluster.")

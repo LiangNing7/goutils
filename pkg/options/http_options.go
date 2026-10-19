@@ -45,7 +45,7 @@ func (o *HTTPOptions) Validate() []error {
 	return errors
 }
 
-// AddFlags adds flags related to HTTPS server for a specific APIServer to the
+// AddFlags adds flags related to the HTTP server for a specific APIServer to the
 // specified FlagSet.
 func (o *HTTPOptions) AddFlags(fs *pflag.FlagSet, prefixes ...string) {
 	fs.StringVar(&o.Network, "http.network", o.Network, "Specify the network for the HTTP server.")

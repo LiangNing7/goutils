@@ -43,7 +43,7 @@ func (o *GRPCOptions) Validate() []error {
 	return errors
 }
 
-// AddFlags adds flags related to features for a specific api server to the
+// AddFlags adds flags related to the gRPC server for a specific api server to the
 // specified FlagSet.
 func (o *GRPCOptions) AddFlags(fs *pflag.FlagSet, prefixes ...string) {
 	fs.StringVar(&o.Network, "grpc.network", o.Network, "Specify the network for the gRPC server.")
