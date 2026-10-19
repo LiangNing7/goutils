@@ -15,14 +15,35 @@ import (
 )
 
 // FileType uses the filetype package to determine the given file path's type.
+//
+// 与旧实现的区别：os.Open 的错误不再被吞掉（旧实现文件不存在时返回 (unknown, nil)），
+// 且文件句柄会被显式关闭，句柄的 Close 错误也会向上返回。
 func FileType(filePath string) (types.Type, error) {
-	file, _ := os.Open(filePath)
+	file, err := os.Open(filePath)
+	if err != nil {
+		return types.Unknown, err
+	}
 
 	// We only have to pass the file header = first 261 bytes
 	head := make([]byte, 261)
-	_, _ = file.Read(head)
+	n, readErr := file.Read(head)
+	if readErr != nil && readErr != io.EOF {
+		// 读失败时也别忘了关闭句柄.
+		_ = file.Close()
+		return types.Unknown, readErr
+	}
 
-	return filetype.Match(head)
+	// 先完成类型匹配，再关闭句柄.
+	matched, matchErr := filetype.Match(head[:n])
+	closeErr := file.Close()
+
+	if matchErr != nil {
+		return matched, matchErr
+	}
+	if closeErr != nil {
+		return matched, closeErr
+	}
+	return matched, nil
 }
 
 // FileExists returns true if the given path exists.
@@ -58,13 +79,24 @@ func Touch(path string) error {
 }
 
 // EnsureDir will create a directory at the given path if it doesn't already exist.
+//
+// 语义：
+//   - 路径不存在：创建目录（os.Mkdir），返回创建结果；
+//   - 路径已存在且是目录：返回 nil（幂等）；
+//   - 路径已存在但不是目录（例如普通文件）：返回错误（旧实现会错误地返回 nil）。
 func EnsureDir(path string) error {
-	exists, err := FileExists(path)
-	if !exists {
-		err = os.Mkdir(path, 0o755)
+	info, err := os.Stat(path)
+	switch {
+	case err == nil:
+		if !info.IsDir() {
+			return fmt.Errorf("path %s already exists and is not a directory", path)
+		}
+		return nil
+	case os.IsNotExist(err):
+		return os.Mkdir(path, 0o755)
+	default:
 		return err
 	}
-	return err
 }
 
 // EnsureDirAll will create a directory at the given path along with any necessary parents if they don't already exist.
@@ -216,12 +248,18 @@ func GetIntraDir(pattern string, depth, length int) string {
 }
 
 // GetParent returns the parent directory of the given path.
+//
+// 语义：路径以路径分隔符结尾（视为 root）或为空串时返回 nil，否则返回清理后的父目录。
+// 旧实现对空串会 panic（切片越界），现已修复。
 func GetParent(path string) *string {
-	isRoot := path[len(path)-1:] == "/"
-	if isRoot {
+	if path == "" {
 		return nil
 	}
-	parentPath := filepath.Clean(path + "/..")
+	// 使用 os.IsPathSeparator 判断，兼容 Windows 的 '\'.
+	if os.IsPathSeparator(path[len(path)-1]) {
+		return nil
+	}
+	parentPath := filepath.Clean(path + string(os.PathSeparator) + "..")
 	return &parentPath
 }
 

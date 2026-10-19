@@ -67,7 +67,7 @@ func Poll(interval, timeout time.Duration, condition wait.ConditionFunc) error {
 // PollImmediate 会“立即”先调用一次 condition，如果 condition 返回 true，则直接返回 nil；
 // 如果 condition 返回 (false, nil)，则进入与 Poll 相同的逻辑，以固定间隔调用 condition，直至超时或出错。
 // 需要注意：为了与原来 wait.PollImmediate 保持一致，第一次检查之后再开始计时，
-// 所以我们先执行一次 “立即” 检查，然后用第二个 context 计算剩余超时时间来调用 PollUntilContextTimeout。
+// 所以我们先执行一次 “立即” 检查，再进入轮询循环。
 func PollImmediate(interval, timeout time.Duration, condition wait.ConditionFunc) error {
 	// 第一次“立即”检查
 	done, err := condition()
@@ -89,7 +89,11 @@ func PollImmediate(interval, timeout time.Duration, condition wait.ConditionFunc
 		return condition()
 	}
 
-	// 调用 PollUntilContextTimeout：第一次会在间隔 interval 之后调用 wrapped，
-	// 之后每隔 interval 继续调用，直至 timeout 或 condition 返回 true/err。
-	return wait.PollUntilContextTimeout(ctx, interval, timeout, true, wrapped)
+	// 重要：这里必须传 immediate=false。
+	// 若传 true，PollUntilContextTimeout 会在进入后立即再调用一次 wrapped，
+	// 与我们上面的“立即检查”连在一起，导致 condition 在起始处被连续调用两次
+	// （副作用函数会被多执行一次，属真实 bug）。
+	// 传 false 后：第一次调用就是上面的“立即检查”，后续调用至少间隔 interval，
+	// 与已废弃的 wait.PollImmediate 语义一致。
+	return wait.PollUntilContextTimeout(ctx, interval, timeout, false, wrapped)
 }
