@@ -157,7 +157,8 @@ func WithDefaultValidArgs() Option {
 	}
 }
 
-// WithWatchConfig watching and re-reading config files.
+// WithWatchConfig enables file reloads for options implementing ConfigReloader.
+// Ordinary options remain unchanged after startup.
 func WithWatchConfig() Option {
 	return func(app *App) {
 		app.watch = true

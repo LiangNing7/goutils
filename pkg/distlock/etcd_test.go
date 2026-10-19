@@ -1,6 +1,8 @@
 package distlock
 
 import (
+	"context"
+	"net"
 	"testing"
 	"time"
 )
@@ -37,4 +39,34 @@ func TestEtcdTTLRoundsUp(t *testing.T) {
 // that a real cluster test was added.
 func TestEtcdLockerIsNotVerifiedAgainstARealCluster(t *testing.T) {
 	t.Skip("EtcdLocker has no unit-testable seam; verified by compilation only. See the README coverage table.")
+}
+
+// A listening endpoint that never speaks gRPC makes lease creation block until
+// the acquisition context is canceled, without requiring an etcd cluster.
+func TestEtcdLockRespectsAcquisitionDeadline(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	locker, err := NewEtcdLocker([]string{"http://" + listener.Addr().String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locker.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- locker.Lock(ctx) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected deadline error")
+		}
+	case <-time.After(2 * time.Second):
+		// Closing the client unblocks even the broken implementation.
+		_ = locker.cli.Close()
+		<-done
+		t.Fatal("Lock ignored acquisition deadline")
+	}
 }

@@ -30,8 +30,7 @@ func AddConfigFlag(fs *pflag.FlagSet, name string, watch bool) {
 	addConfigFlag(fs, name, watch, nil)
 }
 
-// addConfigFlag 与 AddConfigFlag 行为一致，额外支持在热加载后把新的配置
-// 重新应用到 options.
+// addConfigFlag additionally supports safe hot reload through ConfigReloader.
 func addConfigFlag(fs *pflag.FlagSet, name string, watch bool, options any) {
 	fs.AddFlag(pflag.Lookup(configFlagName))
 
@@ -80,6 +79,10 @@ func addConfigFlag(fs *pflag.FlagSet, name string, watch bool, options any) {
 // GoLand 保存文件采用的是「写临时文件 + rename 覆盖」的原子保存方式，会产生
 // REMOVE 事件. 目录级监听不存在这个问题，可以持续恢复.
 func watchConfigWithReload(options any) func() {
+	if _, ok := options.(ConfigReloader); !ok {
+		log.Warnw("Config watch disabled: options must implement app.ConfigReloader")
+		return func() {}
+	}
 	configFile := viper.ConfigFileUsed()
 	if configFile == "" {
 		log.Warnw("Cannot watch configuration file: no config file was loaded")
@@ -182,27 +185,54 @@ func isWatchedConfigEvent(event fsnotify.Event, configFile string) bool {
 	return strings.HasPrefix(filepath.Base(eventName), filepath.Base(target))
 }
 
-// reloadConfig 重新读取配置文件并应用到 options.
+// ConfigReloader opts into hot reload without mutating the startup options.
+// NewReloadOptions must return a fresh, independent candidate with any defaults
+// initialized. ApplyReloadOptions must publish it safely (for example through
+// an atomic pointer), and leave the current configuration intact on error.
+// Candidates are decoded from the file; startup flags are not reapplied.
+// Complete and Validate on the candidate must not mutate the active config.
+type ConfigReloader interface {
+	NewReloadOptions() any
+	ApplyReloadOptions(candidate any) error
+}
+
 func reloadConfig(options any) {
-	if err := viper.ReadInConfig(); err != nil {
+	if err := applyConfigReload(options); err != nil {
 		log.Errorw(err, "Failed to reload configuration file")
 		return
 	}
+	log.Infow("Configuration file reloaded", "file", viper.ConfigFileUsed())
+}
 
-	if options != nil {
-		if err := viper.Unmarshal(options); err != nil {
-			log.Errorw(err, "Failed to apply reloaded configuration")
-			return
-		}
-
-		if complete, ok := options.(interface{ Complete() error }); ok {
-			if err := complete.Complete(); err != nil {
-				log.Errorw(err, "Failed to complete reloaded options")
-			}
+func applyConfigReload(options any) error {
+	reloader, ok := options.(ConfigReloader)
+	if !ok {
+		return fmt.Errorf("options must implement app.ConfigReloader to support hot reload")
+	}
+	// Keep the global Viper and startup options immutable after initialization.
+	next := viper.New()
+	next.SetConfigFile(viper.ConfigFileUsed())
+	if err := next.ReadInConfig(); err != nil {
+		return err
+	}
+	candidate := reloader.NewReloadOptions()
+	if candidate == nil {
+		return fmt.Errorf("NewReloadOptions returned nil")
+	}
+	if err := next.Unmarshal(candidate); err != nil {
+		return err
+	}
+	if complete, ok := candidate.(interface{ Complete() error }); ok {
+		if err := complete.Complete(); err != nil {
+			return err
 		}
 	}
-
-	log.Infow("Configuration file reloaded", "file", viper.ConfigFileUsed())
+	if validate, ok := candidate.(interface{ Validate() error }); ok {
+		if err := validate.Validate(); err != nil {
+			return err
+		}
+	}
+	return reloader.ApplyReloadOptions(candidate)
 }
 
 // sensitiveKeyPatterns 命中这些子串的配置键在做打印时会脱敏.

@@ -46,8 +46,9 @@ type EtcdLocker struct {
 
 	st lockerState
 
-	session *concurrency.Session
-	mutex   *concurrency.Mutex
+	session       *concurrency.Session
+	mutex         *concurrency.Mutex
+	sessionCancel context.CancelFunc
 }
 
 // Ensure EtcdLocker implements the Locker and Closer interfaces.
@@ -103,18 +104,31 @@ func (l *EtcdLocker) Lock(ctx context.Context) error {
 		return fmt.Errorf("%w (etcd key=%s)", ErrLockAlreadyHeld, l.lockKey)
 	}
 
-	// The session context is deliberately not derived from ctx: the session
-	// must stay alive (and keep renewing its lease) after the caller's context
-	// is cancelled. concurrency.NewSession defaults to the client's context,
-	// which is exactly what we want.
-	session, err := concurrency.NewSession(l.cli, concurrency.WithTTL(etcdTTL(l.lockTimeout)))
+	// Bound lease creation to this acquisition, while allowing the session
+	// heartbeat to outlive the caller's context after Lock succeeds.
+	lease, err := l.cli.Grant(ctx, int64(etcdTTL(l.lockTimeout)))
 	if err != nil {
-		l.logger.Error("failed to create etcd session", "key", l.lockKey, "error", err)
+		return fmt.Errorf("distlock/etcd: grant lease: %w", err)
+	}
+	sessionCtx, cancelSession := context.WithCancel(l.cli.Ctx())
+	stopCancel := context.AfterFunc(ctx, cancelSession)
+	acquired := false
+	defer func() {
+		stopCancel()
+		if !acquired {
+			cancelSession()
+		}
+	}()
+	session, err := concurrency.NewSession(l.cli,
+		concurrency.WithTTL(etcdTTL(l.lockTimeout)),
+		concurrency.WithLease(lease.ID), concurrency.WithContext(sessionCtx))
+	if err != nil {
 		return fmt.Errorf("distlock/etcd: create session: %w", err)
 	}
 
 	mutex := concurrency.NewMutex(session, l.lockKey)
 	if err := mutex.TryLock(ctx); err != nil {
+		cancelSession()
 		_ = session.Close()
 		if errors.Is(err, concurrency.ErrLocked) {
 			l.logger.Warn("lock is already held", "key", l.lockKey)
@@ -124,6 +138,13 @@ func (l *EtcdLocker) Lock(ctx context.Context) error {
 		return fmt.Errorf("distlock/etcd: try lock: %w", err)
 	}
 
+	if !stopCancel() || ctx.Err() != nil {
+		cancelSession()
+		_ = session.Close()
+		return ctx.Err()
+	}
+	acquired = true
+	l.sessionCancel = cancelSession
 	l.session, l.mutex = session, mutex
 
 	// No renewal goroutine: the session heartbeat is the renewal. The mutex key
@@ -140,6 +161,10 @@ func (l *EtcdLocker) Unlock(ctx context.Context) error {
 
 	_, held := l.st.clearHeld()
 	mutex, session := l.mutex, l.session
+	if l.sessionCancel != nil {
+		defer l.sessionCancel()
+		l.sessionCancel = nil
+	}
 	l.mutex, l.session = nil, nil
 
 	if !held || mutex == nil {
@@ -195,6 +220,10 @@ func (l *EtcdLocker) Close() error {
 	l.st.clearHeld()
 
 	session := l.session
+	if l.sessionCancel != nil {
+		defer l.sessionCancel()
+		l.sessionCancel = nil
+	}
 	l.session, l.mutex = nil, nil
 	if session != nil {
 		if err := session.Close(); err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -31,13 +32,16 @@ var (
 	// ErrMissingExpiration 表示 token 缺少必须的 exp 声明.
 	ErrMissingExpiration = errors.New("token: token is missing the required exp claim")
 
-	config = Config{"", "identityKey", 2 * time.Hour}
+	configMu sync.RWMutex
+	config   = Config{"", "identityKey", 2 * time.Hour}
 )
 
 // Init 设置包级别的配置 config, config 会用于本包后面的 token 签发和解析.
 // 每次调用都会生效，后调用覆盖先调用（历史实现用 sync.Once 使第二次调用被静默忽略，
 // 导致配置在运行期无法更新且失败难以察觉）.
 func Init(key string, identityKey string, expiration time.Duration) {
+	configMu.Lock()
+	defer configMu.Unlock()
 	if key != "" {
 		config.key = key // 设置密钥
 	}
@@ -49,8 +53,18 @@ func Init(key string, identityKey string, expiration time.Duration) {
 	}
 }
 
+func configSnapshot() Config {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return config
+}
+
 // Parse 使用指定的密钥 key 解析 token，解析成功返回 token 上下文，否则报错.
 func Parse(tokenString string, key string) (string, error) {
+	return parse(tokenString, key, configSnapshot().identityKey)
+}
+
+func parse(tokenString, key, identityClaim string) (string, error) {
 	// 没有密钥时不使用空密钥去验签，直接报错.
 	if key == "" {
 		return "", ErrKeyNotInitialized
@@ -82,7 +96,7 @@ func Parse(tokenString string, key string) (string, error) {
 	}
 
 	// 从 token 中取出 token 的主题
-	identityKey, valid := claims[config.identityKey].(string)
+	identityKey, valid := claims[identityClaim].(string)
 	if !valid || identityKey == "" {
 		return "", jwt.ErrSignatureInvalid
 	}
@@ -123,11 +137,13 @@ func ParseRequest(ctx context.Context) (string, error) {
 		}
 	}
 
-	return Parse(token, config.key) // 解析 token
+	cfg := configSnapshot()
+	return parse(token, cfg.key, cfg.identityKey) // 解析 token
 }
 
 // Sign 使用 jwtSecret 签发 token，token 的 claims 中会存放传入的 subject.
 func Sign(identityKey string) (string, time.Time, error) {
+	config := configSnapshot()
 	// 未注入密钥时不允许签发 token.
 	if config.key == "" {
 		return "", time.Time{}, ErrKeyNotInitialized
