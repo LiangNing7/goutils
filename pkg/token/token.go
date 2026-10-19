@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -25,27 +25,37 @@ type Config struct {
 }
 
 var (
-	config = Config{"Rtg8BPKNEf2mB4mgvKONGPZZQSaJWNLijxR42qRgq0iBb5", "identityKey", 2 * time.Hour}
-	once   sync.Once // 确保配置只被初始化一次
+	// ErrKeyNotInitialized 表示还没有通过 Init 注入密钥.
+	// 本包不再内置默认密钥：历史默认密钥是公开常量，任何人都能据此伪造 token.
+	ErrKeyNotInitialized = errors.New("token: signing key is not initialized, call Init first")
+	// ErrMissingExpiration 表示 token 缺少必须的 exp 声明.
+	ErrMissingExpiration = errors.New("token: token is missing the required exp claim")
+
+	config = Config{"", "identityKey", 2 * time.Hour}
 )
 
 // Init 设置包级别的配置 config, config 会用于本包后面的 token 签发和解析.
+// 每次调用都会生效，后调用覆盖先调用（历史实现用 sync.Once 使第二次调用被静默忽略，
+// 导致配置在运行期无法更新且失败难以察觉）.
 func Init(key string, identityKey string, expiration time.Duration) {
-	once.Do(func() {
-		if key != "" {
-			config.key = key // 设置密钥
-		}
-		if identityKey != "" {
-			config.identityKey = identityKey // 设置身份键
-		}
-		if expiration != 0 {
-			config.expiration = expiration
-		}
-	})
+	if key != "" {
+		config.key = key // 设置密钥
+	}
+	if identityKey != "" {
+		config.identityKey = identityKey // 设置身份键
+	}
+	if expiration != 0 {
+		config.expiration = expiration
+	}
 }
 
 // Parse 使用指定的密钥 key 解析 token，解析成功返回 token 上下文，否则报错.
 func Parse(tokenString string, key string) (string, error) {
+	// 没有密钥时不使用空密钥去验签，直接报错.
+	if key == "" {
+		return "", ErrKeyNotInitialized
+	}
+
 	// 解析 token
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (any, error) {
 		// 确保 token 加密算法是预期的加密算法
@@ -60,16 +70,20 @@ func Parse(tokenString string, key string) (string, error) {
 		return "", err
 	}
 
-	var identityKey string
-	// 如果解析成功，从 token 中取出 token 的主题
-	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-		if key, exists := claims[config.identityKey]; exists {
-			if identity, valid := key.(string); valid {
-				identityKey = identity // 获取身份键
-			}
-		}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok || !token.Valid {
+		return "", jwt.ErrSignatureInvalid
 	}
-	if identityKey == "" {
+
+	// jwt/v4 只校验「存在且已过期」的 exp，缺失 exp 时不会报错，
+	// 因此这里显式要求 exp 存在.
+	if _, exists := claims["exp"]; !exists {
+		return "", ErrMissingExpiration
+	}
+
+	// 从 token 中取出 token 的主题
+	identityKey, valid := claims[config.identityKey].(string)
+	if !valid || identityKey == "" {
 		return "", jwt.ErrSignatureInvalid
 	}
 
@@ -92,8 +106,15 @@ func ParseRequest(ctx context.Context) (string, error) {
 			return "", errors.New("the length of the `Authorization` header is zero") // 返回错误
 		}
 
-		// 从请求头中取出 token
-		_, _ = fmt.Sscanf(header, "Bearer %s", &token) // 解析 Bearer token
+		// 从请求头中取出 token.
+		// 认证方案大小写不敏感（RFC 7235），且格式必须严格为 `Bearer <token>`；
+		// 历史实现用 Sscanf 且忽略错误，header 不合法时会静默得到空 token.
+		scheme, value, found := strings.Cut(header, " ")
+		if !found || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(value) == "" {
+			//nolint: err113
+			return "", fmt.Errorf("invalid `Authorization` header: expected `Bearer <token>`, got %q", header)
+		}
+		token = strings.TrimSpace(value)
 	// 使用 google.golang.org/grpc 框架开发的 gRPC 服务
 	default:
 		token, err = auth.AuthFromMD(typed, "Bearer")
@@ -107,6 +128,11 @@ func ParseRequest(ctx context.Context) (string, error) {
 
 // Sign 使用 jwtSecret 签发 token，token 的 claims 中会存放传入的 subject.
 func Sign(identityKey string) (string, time.Time, error) {
+	// 未注入密钥时不允许签发 token.
+	if config.key == "" {
+		return "", time.Time{}, ErrKeyNotInitialized
+	}
+
 	// 计算过期时间
 	expireAt := time.Now().Add(config.expiration)
 
@@ -117,9 +143,6 @@ func Sign(identityKey string) (string, time.Time, error) {
 		"iat":              time.Now().Unix(), // token 签发时间
 		"exp":              expireAt.Unix(),   // token 过期时间
 	})
-	if config.key == "" {
-		return "", time.Time{}, jwt.ErrInvalidKey
-	}
 
 	// 签发 token
 	tokenString, err := token.SignedString([]byte(config.key))

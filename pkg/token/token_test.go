@@ -12,10 +12,17 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-// TestInit 测试 Init 函数
+// TestInit 测试 Init 函数.
+//
+// 注意：本测试原先断言「包内置默认密钥」以及「第二次调用 Init 被静默忽略」，
+// 这两条断言恰好固化了两个不安全行为（公开的硬编码密钥、配置无法再更新），
+// 随本次安全修复一并修正：
+//   - 不再有内置默认密钥（config.key 默认为空，必须由调用方注入）；
+//   - Init 每次调用都生效（后调用覆盖先调用），不再被 sync.Once 静默忽略。
 func TestInit(t *testing.T) {
-	// 测试默认配置
-	assert.Equal(t, "Rtg8BPKNEf2mB4mgvKONGPZZQSaJWNLijxR42qRgq0iBb5", config.key)
+	// 测试默认配置.
+	resetConfig()
+	assert.Empty(t, config.key) // 不再内置默认密钥
 	assert.Equal(t, "identityKey", config.identityKey)
 	assert.Equal(t, 2*time.Hour, config.expiration)
 
@@ -26,16 +33,18 @@ func TestInit(t *testing.T) {
 	assert.Equal(t, "newIdentityKey", config.identityKey)
 	assert.Equal(t, 3*time.Hour, config.expiration)
 
-	// 再次调用 Init，确保配置不会被覆盖
+	// 再次调用 Init，配置应被更新（后调用生效），而不是被静默忽略.
 	Init("anotherKey", "anotherIdentityKey", 1*time.Hour)
 
-	assert.Equal(t, "newKey", config.key)                 // 仍然是 "newKey"
-	assert.Equal(t, "newIdentityKey", config.identityKey) // 仍然是 "newIdentityKey"
-	assert.Equal(t, 3*time.Hour, config.expiration)       // 仍然是 3小时
+	assert.Equal(t, "anotherKey", config.key)
+	assert.Equal(t, "anotherIdentityKey", config.identityKey)
+	assert.Equal(t, 1*time.Hour, config.expiration)
 }
 
 // TestSign 测试 Sign 函数
 func TestSign(t *testing.T) {
+	Init("testSignKey", "identityKey", 2*time.Hour)
+
 	identityKey := "testUser"
 	tokenString, _, err := Sign(identityKey)
 
@@ -50,6 +59,8 @@ func TestSign(t *testing.T) {
 
 // TestParseInvalidToken 测试解析无效的 token
 func TestParseInvalidToken(t *testing.T) {
+	Init("testParseInvalidTokenKey", "identityKey", 2*time.Hour)
+
 	invalidToken := "invalid.token.string"
 	identityKey, err := Parse(invalidToken, config.key)
 
@@ -59,6 +70,8 @@ func TestParseInvalidToken(t *testing.T) {
 
 // TestParseRequestWithGin 测试从 Gin 上下文解析 token
 func TestParseRequestWithGin(t *testing.T) {
+	Init("testParseRequestWithGinKey", "identityKey", 2*time.Hour)
+
 	// 设置 Gin 上下文
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
@@ -87,6 +100,8 @@ func TestParseRequestWithGin(t *testing.T) {
 
 // TestParseRequestWithGRPC 测试从 gRPC 上下文解析 token
 func TestParseRequestWithGRPC(t *testing.T) {
+	Init("testParseRequestWithGRPCKey", "identityKey", 2*time.Hour)
+
 	// 创建 gRPC 上下文
 	md := metadata.New(map[string]string{"Authorization": "Bearer "})
 	ctx := metadata.NewIncomingContext(context.Background(), md)
