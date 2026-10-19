@@ -23,6 +23,10 @@ type ErrorX struct {
 
 	// Metadata 用于存储与该错误相关的额外元信息，可以包含上下文或调试信息.
 	Metadata map[string]string `json:"metadata,omitempty"`
+
+	// cause 保存被 ErrorX 包装的原始错误，用于保留完整的错误链，
+	// 使得 errors.Is / errors.As / errors.Unwrap 能够穿透到原始错误.
+	cause error
 }
 
 // New 创建一个新的错误.
@@ -34,36 +38,63 @@ func New(code int, reason string, format string, args ...any) *ErrorX {
 	}
 }
 
+// WithCause 返回一个带有原始错误链的新错误（浅拷贝），不会修改接收者.
+func (err *ErrorX) WithCause(cause error) *ErrorX {
+	cp := err.clone()
+	cp.cause = cause
+	return cp
+}
+
+// clone 返回 ErrorX 的浅拷贝.
+func (err *ErrorX) clone() *ErrorX {
+	cp := *err
+	return &cp
+}
+
 // Error 实现 error 接口中的 `Error` 方法.
 func (err *ErrorX) Error() string {
 	return fmt.Sprintf("error: code = %d reason = %s message = %s metadata = %v", err.Code, err.Reason, err.Message, err.Metadata)
 }
 
-// WithMessage 设置错误的 Message 字段.
+// Unwrap 返回被包装的原始错误，用于支持 errors.Is / errors.As 的错误链穿透.
+func (err *ErrorX) Unwrap() error {
+	return err.cause
+}
+
+// WithMessage 设置错误的 Message 字段，并返回一个副本（不修改接收者）.
+// 注意：该行为在 v0.x 中曾是原地修改接收者，为了避免污染包级预定义错误（例如 ErrNotFound）
+// 以及并发写竞争，现在返回副本.
 func (err *ErrorX) WithMessage(format string, args ...any) *ErrorX {
-	err.Message = fmt.Sprintf(format, args...)
-	return err
+	cp := err.clone()
+	cp.Message = fmt.Sprintf(format, args...)
+	return cp
 }
 
-// WithMetadata 设置元数据.
+// WithMetadata 设置元数据，并返回一个副本（不修改接收者）.
 func (err *ErrorX) WithMetadata(md map[string]string) *ErrorX {
-	err.Metadata = md
-	return err
+	cp := err.clone()
+	cp.Metadata = md
+	return cp
 }
 
-// KV 使用 key-value 对设置元数据.
+// KV 使用 key-value 对设置元数据，并返回一个副本（不修改接收者）.
 func (err *ErrorX) KV(kvs ...string) *ErrorX {
-	if err.Metadata == nil {
-		err.Metadata = make(map[string]string) // 初始化元数据映射
+	cp := err.clone()
+
+	// 复制原有 metadata，避免副本与原实例共享同一个 map.
+	md := make(map[string]string, len(cp.Metadata)+len(kvs)/2)
+	for k, v := range cp.Metadata {
+		md[k] = v
 	}
 
 	for i := 0; i < len(kvs); i += 2 {
 		// kvs 必须是成对的
 		if i+1 < len(kvs) {
-			err.Metadata[kvs[i]] = kvs[i+1]
+			md[kvs[i]] = kvs[i+1]
 		}
 	}
-	return err
+	cp.Metadata = md
+	return cp
 }
 
 // GRPCStatus 返回 gRPC 状态表示.
@@ -120,14 +151,15 @@ func FromError(err error) *ErrorX {
 	// gRPC 的 status.FromError 方法尝试将 error 转换为 gRPC 错误的 status 对象.
 	// 如果 err 不能转换为 gRPC 错误（即不是 gRPC 的 status 错误），
 	// 则返回一个带有默认值的 ErrorX，表示是一个未知类型的错误.
+	// 同时通过 cause 保留原始错误，使 errors.Is / errors.As / errors.Unwrap 可以穿透.
 	gs, ok := status.FromError(err)
 	if !ok {
-		return New(ErrInternal.Code, ErrInternal.Reason, "%s", err.Error())
+		return New(ErrInternal.Code, ErrInternal.Reason, "%s", err.Error()).WithCause(err)
 	}
 
 	// 如果 err 是 gRPC 的错误类型，会成功返回一个 gRPC status 对象（gs）.
 	// 使用 gRPC 状态中的错误代码和消息创建一个 ErrorX.
-	ret := New(httpstatus.FromGRPCCode(gs.Code()), ErrInternal.Reason, "%s", gs.Message())
+	ret := New(httpstatus.FromGRPCCode(gs.Code()), ErrInternal.Reason, "%s", gs.Message()).WithCause(err)
 
 	// 遍历 gRPC 错误详情中的所有附加信息（Details）.
 	for _, detail := range gs.Details() {

@@ -11,6 +11,7 @@ type CodeOptions struct {
 }
 
 // WithCodeChars 设置 chars.
+// 字符集至少需要包含 2 个 rune，否则视为非法配置（NewCodeE 返回错误，NewCode 退回默认配置）.
 func WithCodeChars(arr []rune) func(*CodeOptions) {
 	return func(options *CodeOptions) {
 		if len(arr) > 0 {
@@ -34,6 +35,8 @@ func WithCodeN2(n int) func(*CodeOptions) {
 }
 
 // WithCodeL 设置 l.
+// l <= 0 时忽略该选项（保持默认长度 DefaultCodeLength）；
+// l > MaxCodeLength 视为非法配置（NewCodeE 返回错误，NewCode 退回默认配置）.
 func WithCodeL(l int) func(*CodeOptions) {
 	return func(options *CodeOptions) {
 		if l > 0 {

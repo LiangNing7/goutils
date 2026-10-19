@@ -42,35 +42,54 @@ Error() 返回的错误信息中，包含了 HTTP 状态码、错误发生的原
 在 Go 项目开发中，发生错误的原因有很多，大多数情况下，开发者希望将真实的错误信息返回给用户。因此，还需要提供一个方法用来设置 ErrorX 结构体中的 Message 字段。同样的，还需要提供设置 Metadata 字段的方法。为了满足上述诉求，给 ErrorX 增加 WithMessage、WithMetadata、KV 三个方法。实现方式如下所示：
 
 ```go
-// WithMessage 设置错误的 Message 字段.
+// WithMessage 设置错误的 Message 字段，并返回一个副本（不修改接收者）.
 func (err *ErrorX) WithMessage(format string, args ...any) *ErrorX {
-    err.Message = fmt.Sprintf(format, args...)
-    return err
+    cp := err.clone()
+    cp.Message = fmt.Sprintf(format, args...)
+    return cp
 }
 
-// WithMetadata 设置元数据.
+// WithMetadata 设置元数据，并返回一个副本（不修改接收者）.
 func (err *ErrorX) WithMetadata(md map[string]string) *ErrorX {
-    err.Metadata = md
-    return err
+    cp := err.clone()
+    cp.Metadata = md
+    return cp
 }
 
-// KV 使用 key-value 对设置元数据.
+// KV 使用 key-value 对设置元数据，并返回一个副本（不修改接收者）.
 func (err *ErrorX) KV(kvs ...string) *ErrorX {
-    if err.Metadata == nil {
-        err.Metadata = make(map[string]string) // 初始化元数据映射
+    cp := err.clone()
+
+    // 复制原有 metadata，避免副本与原实例共享同一个 map.
+    md := make(map[string]string, len(cp.Metadata)+len(kvs)/2)
+    for k, v := range cp.Metadata {
+        md[k] = v
     }
 
     for i := 0; i < len(kvs); i += 2 {
         // kvs 必须是成对的
         if i+1 < len(kvs) {
-            err.Metadata[kvs[i]] = kvs[i+1]
+            md[kvs[i]] = kvs[i+1]
         }
     }
-    return err
+    cp.Metadata = md
+    return cp
 }
 ```
 
 上述代码中，设置 Message、Metadata 字段的方法名分别为 WithMessage、WithMetadata。WithXXX，在 Go 项目开发中是一种很常见的命名方式，寓意是：设置 XXX。KV 方法则以追加的方式给 Metadata 增加键值对。
+
+> **行为变更**：这三个方法返回**副本**而不是原地修改接收者。
+> 原地修改会让 `errorsx.FromError(ErrNotFound).WithMessage("x")` 之类的调用永久污染包级预定义错误
+> （`ErrNotFound.Message` 被改写），并且在并发调用时产生数据竞争。
+> 链式调用必须使用返回值：
+>
+> ```go
+> // 正确
+> err := errorsx.ErrNotFound.WithMessage("not found: %s", name)
+> // 错误：返回值被丢弃，Message 不会被修改
+> errorsx.ErrNotFound.WithMessage("not found: %s", name)
+> ```
 
 WithMessage、WithMetadata、KV 都返回了 *ErrorX 类型的实例，目的是为了实现链式调用，例如：
 
@@ -127,14 +146,16 @@ func FromError(err error) *ErrorX {
     // gRPC 的 status.FromError 方法尝试将 error 转换为 gRPC 错误的 status 对象.
     // 如果 err 不能转换为 gRPC 错误（即不是 gRPC 的 status 错误），
     // 则返回一个带有默认值的 ErrorX，表示是一个未知类型的错误.
+    // 无论哪条分支，都通过 WithCause 把原始错误保留在错误链中，
+    // 使 errors.Is / errors.As / errors.Unwrap 可以穿透到原始错误.
     gs, ok := status.FromError(err)
     if !ok {
-        return New(ErrInternal.Code, ErrInternal.Reason, "%s",err.Error())
+        return New(ErrInternal.Code, ErrInternal.Reason, "%s", err.Error()).WithCause(err)
     }
 
     // 如果 err 是 gRPC 的错误类型，会成功返回一个 gRPC status 对象（gs）.
     // 使用 gRPC 状态中的错误代码和消息创建一个 ErrorX.
-    ret := New(httpstatus.FromGRPCCode(gs.Code()), ErrInternal.Reason, "%s",gs.Message())
+    ret := New(httpstatus.FromGRPCCode(gs.Code()), ErrInternal.Reason, "%s", gs.Message()).WithCause(err)
 
     // 遍历 gRPC 错误详情中的所有附加信息（Details）.
     for _, detail := range gs.Details() {
@@ -163,6 +184,18 @@ func (err *ErrorX) Is(target error) bool {
 ```
 
 Is 方法中，通过对比 Code 和 Reason 字段，来判断 target 错误是否是指定的预定义错误。注意，Is 方法中，没有对比 Message 字段的值，这是因为 Message 字段的值通常是动态的，而错误类型的定义不依赖于 Message。
+
+ErrorX 还实现了 `Unwrap()`，用于保留被包装的原始错误：
+
+```go
+// Unwrap 返回被包装的原始错误，用于支持 errors.Is / errors.As 的错误链穿透.
+func (err *ErrorX) Unwrap() error {
+    return err.cause
+}
+```
+
+这样 `errors.Is(errx, target)` 的语义是：先按 Code/Reason 匹配 `*ErrorX`（`Is` 方法），
+匹配失败后再沿错误链穿透，最终能命中 `FromError` 之前被包装的原始错误.
 
 至此，成功开发了一个满足项目需求的错误包 errorsx，代码完整实现见 goutils 项目的 [`pkg/errorsx/errorsx.go`](https://github.com/LiangNing7/goutils/blob/main/pkg/errorsx/errorsx.go) 文件。
 

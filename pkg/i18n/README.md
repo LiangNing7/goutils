@@ -42,7 +42,7 @@ func main() {
 		i18n.WithFile("locales/en.yml"),
 		i18n.WithFile("locales/zh.yml"),
 		// with go embed files
-		// i18n.WithFs(locales),
+		// i18n.WithFS(locales),
 		i18n.WithLanguage(language.Chinese),
 	)
 
@@ -62,7 +62,12 @@ func main() {
 
 ## Options
 
-* `WithFormat` - language file format, default yml
+* `WithFormat` - language file format, default yml。支持 `yml` / `yaml` / `toml` / `json`（`yml` 与 `yaml` 都注册 yaml 解析器）；未知 format 会降级为 yaml
 * `WithLanguage` - set default language file format, default en
 * `WithFile` - set language files by file system
-* `WithFs` - set language files by go embed file
+* `WithFS` - set language files by go embed file
+
+## 并发
+
+`Add` / `AddFS` 支持在构造后被并发调用（运行期热加载）：内部使用 `sync.RWMutex`
+与 `T` / `LocalizeT` 的读取互斥，配合 `-race` 无告警。

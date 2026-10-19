@@ -38,9 +38,12 @@ func NewSonyflake(options ...func(*SonyflakeOptions)) *Sonyflake {
 	}
 
 	// 创建 Sonyflake 实例.
+	// StartTime 在未来时 sonyflake.NewSonyflake 会返回 nil，此时直接返回，
+	// 避免继续调用 ins.NextID() 触发空指针 panic.
 	ins := sonyflake.NewSonyflake(st)
 	if ins == nil {
 		sf.Error = fmt.Errorf("create sonyflake failed")
+		return sf
 	}
 
 	// 立即调用 ins.NextID() 试生成一次，校验 StartTime 是否有效.
