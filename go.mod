@@ -172,7 +172,7 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20250303144028-a0af3efb3deb // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gorm.io/driver/sqlserver v1.6.0 // indirect
-	gorm.io/plugin/dbresolver v1.5.3 // indirect
+	gorm.io/plugin/dbresolver v1.6.2 // indirect
 	modernc.org/libc v1.22.2 // indirect
 	modernc.org/mathutil v1.5.0 // indirect
 	modernc.org/memory v1.5.0 // indirect

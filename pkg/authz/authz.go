@@ -1,6 +1,7 @@
 package authz
 
 import (
+	"fmt"
 	"time"
 
 	casbin "github.com/casbin/casbin/v2"
@@ -90,24 +91,31 @@ func NewAuthz(db *gorm.DB, opts ...Option) (*Authz, error) {
 		opt(cfg)
 	}
 
+	// 从配置中加载 Casbin 模型.
+	// 必须先校验模型：模型非法时 m 为 nil，若继续执行只会在后续（甚至运行期）
+	// 以难以定位的方式失败。
+	m, err := model.NewModelFromString(cfg.aclModel)
+	if err != nil {
+		return nil, fmt.Errorf("authz: invalid acl model: %w", err)
+	}
+
 	// 初始化 Gorm 适配器并用于 Casbin 授权器.
 	adapter, err := adapter.NewAdapterByDB(db)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("authz: create adapter: %w", err)
 	}
 
-	// 从配置中加载 Casbin 模型.
-	m, _ := model.NewModelFromString(cfg.aclModel)
-
 	// 初始化授权器.
+	// 使用 SyncedEnforcer，其内部以读写锁保护策略的读写，
+	// 因此可以被多个 goroutine 并发调用。
 	enforcer, err := casbin.NewSyncedEnforcer(m, adapter)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("authz: create enforcer: %w", err)
 	}
 
 	// 从数据库中加载策略.
 	if err := enforcer.LoadPolicy(); err != nil {
-		return nil, err // 返回错误
+		return nil, fmt.Errorf("authz: load policy: %w", err) // 返回错误
 	}
 
 	// 启动自动加载策略，使用配置的时间间隔.
@@ -119,6 +127,12 @@ func NewAuthz(db *gorm.DB, opts ...Option) (*Authz, error) {
 
 // Authorize 用于进行授权.
 func (a *Authz) Authorize(sub, obj, act string) (bool, error) {
-	// 调用 Enforce 方法进行授权检查
-	return a.Enforce(sub, obj, act)
+	// 调用 Enforce 方法进行授权检查.
+	// SyncedEnforcer.Enforce 内部持有读锁，可以安全地被并发调用。
+	allowed, err := a.Enforce(sub, obj, act)
+	if err != nil {
+		return false, fmt.Errorf("authz: enforce policy: %w", err)
+	}
+
+	return allowed, nil
 }

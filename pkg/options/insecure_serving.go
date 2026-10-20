@@ -28,8 +28,8 @@ func (s *InsecureServingOptions) Validate() []error {
 	return errors
 }
 
-// AddFlags adds flags related to features for a specific api server to the
-// specified FlagSet.
+// AddFlags adds flags related to the insecure (plain HTTP) server for a specific
+// api server to the specified FlagSet.
 func (s *InsecureServingOptions) AddFlags(fs *pflag.FlagSet, prefixes ...string) {
 	fs.StringVar(&s.Addr, "insecure.addr", s.Addr, "Specify the HTTP server bind address and port.")
 }

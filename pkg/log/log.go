@@ -6,7 +6,7 @@ package log
 import (
 	"context"
 	"maps"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	krtlog "github.com/go-kratos/kratos/v2/log"
@@ -56,9 +56,13 @@ type Option func(*zapLogger)
 var _ Logger = (*zapLogger)(nil)
 
 var (
-	mu  sync.Mutex
-	std = NewLogger(NewOptions())
+	// std 使用原子指针保存，保证 Init 与并发日志调用之间没有数据竞争.
+	std atomic.Pointer[zapLogger]
 )
+
+func init() {
+	std.Store(NewLogger(NewOptions()))
+}
 
 // WithContextExtractor 添加自定义的 context 提取逻辑
 func WithContextExtractor(contextExtractors ContextExtractors) Option {
@@ -74,9 +78,8 @@ func WithContextExtractor(contextExtractors ContextExtractors) Option {
 
 // Init 使用指定的选项初始化 Logger.
 func Init(opts *Options, options ...Option) {
-	mu.Lock()
-	defer mu.Unlock()
-	std = NewLogger(opts)
+	// options 必须转发给 NewLogger，否则 WithContextExtractor 等选项完全失效.
+	std.Store(NewLogger(opts, options...))
 }
 
 // NewLogger 根据传入的 opts 创建 Logger.
@@ -151,11 +154,11 @@ func NewLogger(opts *Options, options ...Option) *zapLogger {
 
 // Default 返回全局 Logger.
 func Default() Logger {
-	return std
+	return std.Load()
 }
 
 // Sync 刷新日志.
-func Sync() { std.Sync() }
+func Sync() { std.Load().Sync() }
 
 func (l *zapLogger) Sync() { _ = l.z.Sync() }
 
@@ -163,18 +166,22 @@ func (l *zapLogger) Options() *Options {
 	return l.opts
 }
 
-func Debugf(format string, args ...any)            { std.Debugf(format, args...) }
-func Debugw(msg string, keyvals ...any)            { std.Debugw(msg, keyvals...) }
-func Infof(format string, args ...any)             { std.Infof(format, args...) }
-func Infow(msg string, keyvals ...any)             { std.Infow(msg, keyvals...) }
-func Warnf(format string, args ...any)             { std.Warnf(format, args...) }
-func Warnw(msg string, keyvals ...any)             { std.Warnw(msg, keyvals...) }
-func Errorf(format string, args ...any)            { std.Errorf(format, args...) }
-func Errorw(err error, msg string, keyvals ...any) { std.Errorw(err, msg, keyvals...) }
-func Panicf(format string, args ...any)            { std.Panicf(format, args...) }
-func Panicw(msg string, keyvals ...any)            { std.Panicw(msg, keyvals...) }
-func Fatalf(format string, args ...any)            { std.Fatalf(format, args...) }
-func Fatalw(msg string, keyvals ...any)            { std.Fatalw(msg, keyvals...) }
+// 包级日志函数直接调用 (*zapLogger).log，而不是转发到 std 的同名方法.
+// 否则会平白多出一层调用栈，导致 zap 记录的 caller 落在 log 包内部.
+func Debugf(format string, args ...any) { std.Load().log(zapcore.DebugLevel, format, args...) }
+func Debugw(msg string, keyvals ...any) { std.Load().log(zapcore.DebugLevel, msg, keyvals...) }
+func Infof(format string, args ...any)  { std.Load().log(zapcore.InfoLevel, format, args...) }
+func Infow(msg string, keyvals ...any)  { std.Load().log(zapcore.InfoLevel, msg, keyvals...) }
+func Warnf(format string, args ...any)  { std.Load().log(zapcore.WarnLevel, format, args...) }
+func Warnw(msg string, keyvals ...any)  { std.Load().log(zapcore.WarnLevel, msg, keyvals...) }
+func Errorf(format string, args ...any) { std.Load().log(zapcore.ErrorLevel, format, args...) }
+func Errorw(err error, msg string, keyvals ...any) {
+	std.Load().log(zapcore.ErrorLevel, msg, append(keyvals, "err", err)...)
+}
+func Panicf(format string, args ...any) { std.Load().log(zapcore.PanicLevel, format, args...) }
+func Panicw(msg string, keyvals ...any) { std.Load().log(zapcore.PanicLevel, msg, keyvals...) }
+func Fatalf(format string, args ...any) { std.Load().log(zapcore.FatalLevel, format, args...) }
+func Fatalw(msg string, keyvals ...any) { std.Load().log(zapcore.FatalLevel, msg, keyvals...) }
 
 func (l *zapLogger) Debugf(format string, args ...any) { l.log(zapcore.DebugLevel, format, args...) }
 func (l *zapLogger) Debugw(msg string, keyvals ...any) { l.log(zapcore.DebugLevel, msg, keyvals...) }
@@ -192,7 +199,7 @@ func (l *zapLogger) Fatalf(format string, args ...any) { l.log(zapcore.FatalLeve
 func (l *zapLogger) Fatalw(msg string, keyvals ...any) { l.log(zapcore.FatalLevel, msg, keyvals...) }
 
 func AddCallerSkip(skip int) Logger {
-	return std.AddCallerSkip(skip)
+	return std.Load().AddCallerSkip(skip)
 }
 
 // AddCallerSkip increases the number of callers skipped by caller annotation
@@ -207,7 +214,7 @@ func (l *zapLogger) AddCallerSkip(skip int) Logger {
 
 // W 解析传入的 context，尝试提取关注的键值，并添加到 zap.Logger 结构化日志中.
 func W(ctx context.Context) Logger {
-	return std.W(ctx)
+	return std.Load().W(ctx)
 }
 
 // W 方法，根据 context 提取字段并添加到日志中

@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"runtime/debug"
 	"time"
 
 	"github.com/LiangNing7/goutils/pkg/log"
@@ -19,7 +21,17 @@ type Server interface {
 // Serve starts the server and blocks until the context is canceled.
 // It ensures the server is gracefully shut down when the context is done.
 func Serve(ctx context.Context, srv Server) error {
-	go srv.RunOrDie()
+	go func() {
+		// RunOrDie 内部的 panic 会直接崩溃进程，这里兜底记录.
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorw(fmt.Errorf("panic: %v", r), "Recovered from panic in server",
+					"stack", string(debug.Stack()))
+			}
+		}()
+
+		srv.RunOrDie()
+	}()
 
 	// Block until the context is canceled or terminated.
 	<-ctx.Done()
@@ -34,6 +46,9 @@ func Serve(ctx context.Context, srv Server) error {
 	srv.GracefulStop(ctx)
 
 	log.Infow("Server exited successfully.")
+
+	// 文件 sink 可能带缓冲，退出前刷新，避免丢日志.
+	log.Sync()
 
 	return nil
 }

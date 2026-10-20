@@ -17,6 +17,10 @@ func ValidateAllFields(obj any, rules Rules) error {
 
 // 通用校验函数
 func ValidateSelectedFields(obj any, rules Rules, fields ...string) error {
+	if obj == nil {
+		return fmt.Errorf("expected a struct, got %s", reflect.Invalid)
+	}
+
 	// 通过反射获取结构体的值和类型
 	objValue := reflect.ValueOf(obj)
 	objType := reflect.TypeOf(obj)
@@ -73,6 +77,10 @@ func ValidateSelectedFields(obj any, rules Rules, fields ...string) error {
 func GetExportedFieldNames(obj any) []string {
 	// 获取传入值的类型和值
 	typ := reflect.TypeOf(obj)
+	if typ == nil {
+		// nil 入参没有任何字段
+		return []string{}
+	}
 
 	// 校验是否为结构体或结构体指针
 	if typ.Kind() == reflect.Ptr {

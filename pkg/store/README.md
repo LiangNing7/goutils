@@ -20,7 +20,8 @@ type Options struct {
     // Offset 定义了分页的起始位置。  
     // +optional  
     Offset int `json:"offset"`  
-    // Limit 定义了返回结果的最大数量。  
+    // Limit 定义了返回结果的最大数量。
+    // <= 0 的语义由 normalizeLimit 统一处理：0 表示使用 defaultLimit，负数表示显式取消 LIMIT。
     // +optional  
     Limit int `json:"limit"`  
     // Filters 包含用于过滤记录的键值对。  
@@ -30,10 +31,23 @@ type Options struct {
 }
 // Options结构体中的字段最后会通过以下方式，来为*gorm.DB类型的实例添加查询条件：
 // Where applies the filters and clauses to the given gorm.DB instance.
+// 注意：Where 不会修改 receiver，同一个 *Options 可以被安全地重复、并发使用。
 func (whr *Options) Where(db *gorm.DB) *gorm.DB {
-    return db.Where(whr.Filters).Clauses(whr.Clauses...).Offset(whr.Offset).Limit(whr.Limit)
+    all := make([]clause.Expression, 0, len(whr.Queries)+len(whr.Clauses))
+    for _, query := range whr.Queries {
+        all = append(all, db.Statement.BuildCondition(query.Query, query.Args...)...)
+    }
+    return db.Where(whr.Filters).Clauses(append(all, whr.Clauses...)...).Offset(whr.Offset).Limit(whr.Limit)
 }
 ```
+
+### 关于默认分页大小（defaultLimit）
+
+`defaultLimit` 的值为 **20**，是一个真正的默认页大小（而不是 `-1`）。请特别注意：
+
+- `NewWhere()`、`L(0)`、`P(page, 0)`、`WithLimit(0)`、`WithPage(page, 0)` 都会落到默认页大小 20；
+- 在 GORM 中 `Limit(-1)` 表示**取消 LIMIT**（返回全表），因此这些入口过去会意外触发全表扫描；该行为已被修复；
+- 如果确实需要返回全部记录，必须**显式**取消限制：`NewWhere().WithoutLimit()`、`NewWhere(WithUnlimited())`，或沿用旧语义传入负数的 limit（`L(-1)`、`WithLimit(-1)`）。
 
 where 包通过配置 `where.Options` 结构体，来配置 GORM 的查询条件。Offset 字段用来配置查询记录时分页的起始位置，Limit 字段用来配置返回结果的最大数量，Filters 字段用来配置查询时过滤记录的键值对，Clauses 字段直接用来指定 `*gorm.DB` 的查询子句。where 包提供了以下三种方式，用来配置Options：
 
@@ -59,29 +73,37 @@ func WithOffset(offset int64) Option {
     }  
 }  
 
-// WithLimit 使用给定的 limit 值初始化 Options 的 Limit 字段。  
+// WithLimit 使用给定的 limit 值初始化 Options 的 Limit 字段。
+// limit == 0 时使用 defaultLimit，limit < 0 时显式取消 LIMIT。
 func WithLimit(limit int64) Option {  
     return func(whr *Options) {  
-        if limit <= 0 {  
-            limit = defaultLimit  
-        }  
-        whr.Limit = int(limit)  
+        whr.Limit = normalizeLimit(int(limit))  
     }  
 }  
 
 // WithPage 是一个糖函数，用于将 page 和 pageSize 转换为 Options 中的 limit 和 offset。  
-// 此函数通常用于业务逻辑中以简化分页操作。  
+// 此函数通常用于业务逻辑中以简化分页操作。
+// pageSize == 0 时使用 defaultLimit，pageSize < 0 时取消 LIMIT。
 func WithPage(page int, pageSize int) Option {  
     return func(whr *Options) {  
-        if page == 0 {  
+        if page < 1 {  
             page = 1  
         }  
-        if pageSize == 0 {  
-            pageSize = defaultLimit  
+        pageSize = normalizeLimit(pageSize)  
+        if pageSize == unlimitedLimit {  
+            whr.Offset = 0  
+            whr.Limit = unlimitedLimit  
+            return  
         }  
-
         whr.Offset = (page - 1) * pageSize  
         whr.Limit = pageSize  
+    }  
+}  
+
+// WithUnlimited 显式取消 LIMIT，查询将返回全部匹配记录（请仅在确实需要时使用）。
+func WithUnlimited() Option {  
+    return func(whr *Options) {  
+        whr.Limit = unlimitedLimit  
     }  
 }  
 
@@ -100,6 +122,7 @@ func WithClauses(conds ...clause.Expression) Option {
 }  
 
 // NewWhere 构建一个新的 Options 对象，并应用所给定的 Option 修改。  
+// 默认 Limit 为 defaultLimit（默认页大小 20），而不是 -1（全表）。
 func NewWhere(opts ...Option) *Options {  
     whr := &Options{  
         Offset:  0,  
@@ -117,6 +140,30 @@ func NewWhere(opts ...Option) *Options {
 ```
 
 上述代码使用了函数选项模式来配置 `*Options` 结构体。函数选项模式是软件开发中高频使用的设计模式，该设计模式允许开发者根据需要为函数传递不同的选项参数，以定制函数的行为。
+
+### 错误感知：Err / FMust
+
+`F` 用于批量设置过滤条件。当传入的键值对个数为奇数时，`F` **不再静默丢弃**：
+
+- 会应用所有已配对的键值对（保证 `tenant_id` 等关键过滤条件不被连带丢弃）；
+- 同时把错误记录在 `Options` 中，可通过 `Err()` 感知。
+
+如需在调用点强制处理错误，请使用 `FMust`：
+
+```go
+opts := where.NewWhere().F("tenant_id", tid, "status", "active") // 奇数个参数：应用已配对的条件并记录错误
+if err := opts.Err(); err != nil { /* 处理错误 */ }
+
+opts, err := where.NewWhere().FMust("tenant_id", tid)
+if err != nil { /* 处理错误 */ }
+```
+
+### 租户过滤：T / RegisterTenant
+
+`RegisterTenant(key, valueFunc)` 注册全局租户信息后，包级函数 `T(ctx)` 与方法 `(whr *Options).T(ctx)` 会把租户过滤条件写入 `Filters`。
+
+两者行为一致：**未注册租户或 `ValueFunc` 为 nil 时不会 panic**，而是直接返回不带租户过滤的 `Options`。
+因此请务必在应用启动时完成 `RegisterTenant`，并配合日志/监控确认租户过滤已生效。
 
 ### 使用便捷函数直接创建
 
@@ -258,11 +305,25 @@ func (r *Registry) Migrate(db *gorm.DB) error {
 常见 CRUD 方法
 
 * `Create(ctx, obj)`：插入新记录。
-* `Update(ctx, obj)`：保存（更新）已有记录。
+* `Update(ctx, obj)`：更新已有记录。内部会先校验主键：**缺少主键时返回 `store.ErrMissingPrimaryKey`**，不再退化为 `INSERT`（GORM 的 `Save` 在空主键时会插入新行）。主键存在时行为与 `Save` 一致。
 * `Delete(ctx, opts)`：根据 `where.Options` 删除记录，忽略“记录不存在”错误。
 * `Get(ctx, opts)`：根据条件查询单条记录。
 * `List(ctx, opts)`：根据条件分页或排序查询多条记录，并返回总数。
 
+> 说明：`Create` / `Update` 的签名不接受 `where.Options`，因此无法在方法内部自动套用租户过滤。
+> 多租户场景请在写入前自行设置租户列（例如模型的 `tenant_id` 字段），或使用 `db(ctx, opts)` 风格的显式 Where 逐个操作。
+
 可插拔的查询条件
 
 * 在内部方法 `db(ctx, wheres...)` 中，将传入的一系列 `where.Where`（例如封装过滤、分页等）依次应用到 `*gorm.DB` 上，做到查询条件和存储操作解耦。
+* 传入 `nil` 或 typed-nil（例如 `(*where.Options)(nil)`）的 `where.Where` 会被安全跳过，不会因为解引用 nil receiver 而 panic。
+
+## logger
+
+`pkg/store/logger` 下提供 `Logger` 接口的实现：
+
+* `empty`：空实现，`Store` 未指定 Logger 时的默认值；
+* `onex`：基于 `pkg/log` 的输出实现，签名与 `store.Logger` 一致（`Error(ctx, err, msg, kvs...)`）。
+
+两个子包都带有编译期断言 `var _ store.Logger = ...`，接口不匹配时会在编译期暴露，而不会静默不可用。
+

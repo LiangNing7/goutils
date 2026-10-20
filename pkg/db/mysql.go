@@ -21,6 +21,11 @@ type MySQLOptions struct {
 	MaxConnectionLifeTime time.Duration
 	// +optional
 	Logger logger.Interface
+	// +optional
+	// DisableDefaultTransaction 关闭 gorm 默认的写事务包装（gorm.Config.SkipDefaultTransaction）。
+	// 默认 false，保持 gorm 的默认语义（每个写操作包在事务中）。
+	// 仅当调用方明确接受"单条写语句在非事务上下文中执行"时才建议开启，可获得一定的性能收益。
+	DisableDefaultTransaction bool
 }
 
 // DSN return DSN from MySQLOptions.
@@ -44,6 +49,8 @@ func NewMySQL(opts *MySQLOptions) (*gorm.DB, error) {
 		// This can improve performance.
 		PrepareStmt: true,
 		Logger:      opts.Logger,
+		// 默认保持 gorm 语义（写操作包事务）；仅在显式开启时关闭。
+		SkipDefaultTransaction: opts.DisableDefaultTransaction,
 	})
 	if err != nil {
 		return nil, err
@@ -81,7 +88,8 @@ func setMySQLDefaults(opts *MySQLOptions) {
 		opts.MaxConnectionLifeTime = time.Duration(10) * time.Second
 	}
 	if opts.Logger == nil {
-		opts.Logger = logger.Default
+		// 默认使用参数化的 logger，避免把 SQL 参数（PII/密码哈希）插值进日志。
+		opts.Logger = defaultGormLogger()
 	}
 }
 

@@ -3,7 +3,7 @@ package options
 import (
 	"context"
 	"fmt"
-	"net/url"
+	"strings"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -14,13 +14,19 @@ import (
 
 var _ IOptions = (*MongoOptions)(nil)
 
+// defaultMongoTimeout is used for connect/ping when Timeout is not configured
+// (or is non-positive). It must be strictly positive: context.WithTimeout with a
+// zero or negative duration yields an already-expired context, which makes every
+// Connect/Ping call fail immediately.
+const defaultMongoTimeout = 30 * time.Second
+
 // MongoOptions contains options for connecting to a MongoDB server.
 type MongoOptions struct {
 	URL        string        `json:"url" mapstructure:"url"`
 	Database   string        `json:"database" mapstructure:"database"`
 	Collection string        `json:"collection" mapstructure:"collection"`
 	Username   string        `json:"username" mapstructure:"username"`
-	Password   string        `json:"password" mapstructure:"password"`
+	Password   string        `json:"-" mapstructure:"password"`
 	Timeout    time.Duration `json:"timeout" mapstructure:"timeout"`
 	TLSOptions *TLSOptions   `json:"tls" mapstructure:"tls"`
 }
@@ -33,12 +39,41 @@ func NewMongoOptions() *MongoOptions {
 	}
 }
 
+// validateMongoURL reports whether uri is an acceptable MongoDB connection
+// string.
+//
+// net/url.Parse must not be used here: it accepts `""` and arbitrary text (so
+// the driver silently fell back to mongodb://localhost:27017) and it rejects the
+// perfectly valid `127.0.0.1:27017` form. Instead we hand the URI to the driver
+// itself through the stable public ClientOptions API, which records the parse
+// error and surfaces it via Validate().
+func validateMongoURL(uri string) error {
+	if strings.TrimSpace(uri) == "" {
+		return fmt.Errorf("--mongo.url can not be empty")
+	}
+
+	if err := options.Client().ApplyURI(uri).Validate(); err != nil {
+		return fmt.Errorf("invalid mongo url %q: %w", uri, err)
+	}
+
+	return nil
+}
+
+// effectiveTimeout returns the timeout to use for connect/ping operations.
+func (o *MongoOptions) effectiveTimeout() time.Duration {
+	if o.Timeout <= 0 {
+		return defaultMongoTimeout
+	}
+
+	return o.Timeout
+}
+
 // Validate verifies flags passed to MongoOptions.
 func (o *MongoOptions) Validate() []error {
 	errs := []error{}
 
-	if _, err := url.Parse(o.URL); err != nil {
-		errs = append(errs, fmt.Errorf("unable to parse connection URL: %w", err))
+	if err := validateMongoURL(o.URL); err != nil {
+		errs = append(errs, err)
 	}
 
 	if o.Database == "" {
@@ -56,8 +91,11 @@ func (o *MongoOptions) Validate() []error {
 	return errs
 }
 
-// AddFlags adds flags related to redis storage for a specific APIServer to the specified FlagSet.
+// AddFlags adds flags related to mongodb storage for a specific APIServer to the specified FlagSet.
 func (o *MongoOptions) AddFlags(fs *pflag.FlagSet, prefixes ...string) {
+	if o.TLSOptions == nil {
+		o.TLSOptions = NewTLSOptions()
+	}
 	o.TLSOptions.AddFlags(fs, "mongo")
 
 	fs.DurationVar(&o.Timeout, "mongo.timeout", o.Timeout, "Timeout is the maximum amount of time a dial will wait for a connect to complete.")
@@ -70,6 +108,13 @@ func (o *MongoOptions) AddFlags(fs *pflag.FlagSet, prefixes ...string) {
 
 // NewClient creates a new MongoDB client based on the provided options.
 func (o *MongoOptions) NewClient() (*mongo.Client, error) {
+	// Fail fast on an empty/invalid URL: ApplyURI("") makes the driver fall back
+	// to mongodb://localhost:27017, so production would silently connect to the
+	// local machine.
+	if err := validateMongoURL(o.URL); err != nil {
+		return nil, err
+	}
+
 	// Set client options
 	opts := options.Client().ApplyURI(o.URL).SetReadPreference(readpref.Primary())
 	if o.Timeout > 0 {
@@ -92,7 +137,10 @@ func (o *MongoOptions) NewClient() (*mongo.Client, error) {
 		opts.SetTLSConfig(tlsConf)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), o.Timeout)
+	// o.effectiveTimeout() never returns a non-positive value, so the context
+	// below is always usable (context.WithTimeout(ctx, 0) would already be
+	// expired by the time mongo.Connect/Ping run).
+	ctx, cancel := context.WithTimeout(context.Background(), o.effectiveTimeout())
 	defer cancel()
 
 	// Connect to MongoDB

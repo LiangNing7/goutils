@@ -12,17 +12,23 @@ var _ IOptions = (*JWTOptions)(nil)
 
 // JWTOptions contains configuration items related to API server features.
 type JWTOptions struct {
-	Key           string        `json:"key" mapstructure:"key"`
+	// Key is the private signing key. It is never exported via json.Marshal so
+	// that it cannot end up in structured logs.
+	Key           string        `json:"-" mapstructure:"key"`
 	Expired       time.Duration `json:"expired" mapstructure:"expired"`
 	MaxRefresh    time.Duration `json:"max-refresh" mapstructure:"max-refresh"`
 	SigningMethod string        `json:"signing-method" mapstructure:"signing-method"`
 }
 
 // NewJWTOptions creates a JWTOptions object with default parameters.
+//
+// Key is intentionally empty: no default signing key is shipped, it MUST be
+// provided by the configuration file, a command line flag or an environment
+// variable. Validate therefore fails until it is set.
 func NewJWTOptions() *JWTOptions {
 	return &JWTOptions{
 		// Realm:         "",
-		Key:           "onex(#)666",
+		Key:           "",
 		Expired:       2 * time.Hour,
 		MaxRefresh:    2 * time.Hour,
 		SigningMethod: "HS512",
@@ -41,7 +47,7 @@ func (s *JWTOptions) Validate() []error {
 	return errs
 }
 
-// AddFlags adds flags related to features for a specific api server to the
+// AddFlags adds flags related to JWT tokens for a specific api server to the
 // specified FlagSet.
 func (s *JWTOptions) AddFlags(fs *pflag.FlagSet, prefixes ...string) {
 	if fs == nil {

@@ -29,8 +29,8 @@ func TestErrorX_WithMessage(t *testing.T) {
 	// 创建一个基础错误
 	errx := errorsx.New(400, "BadRequest.InvalidInput", "Invalid input for field %s", "username")
 
-	// 更新错误的消息
-	errx.WithMessage("New error message: %s", "retry failed")
+	// 更新错误的消息（WithMessage 返回副本，不修改接收者）
+	errx = errx.WithMessage("New error message: %s", "retry failed")
 
 	// 验证变更
 	assert.Equal(t, "New error message: retry failed", errx.Message)
@@ -42,8 +42,8 @@ func TestErrorX_WithMetadata(t *testing.T) {
 	// 创建基础错误
 	errx := errorsx.New(400, "BadRequest.InvalidInput", "Invalid input")
 
-	// 添加元数据
-	errx.WithMetadata(map[string]string{
+	// 添加元数据（WithMetadata 返回副本，不修改接收者）
+	errx = errx.WithMetadata(map[string]string{
 		"field": "username",
 		"type":  "empty",
 	})
@@ -53,7 +53,7 @@ func TestErrorX_WithMetadata(t *testing.T) {
 	assert.Equal(t, "empty", errx.Metadata["type"])
 
 	// 动态添加更多元数据
-	errx.KV("user_id", "12345", "trace_id", "xyz-789")
+	errx = errx.KV("user_id", "12345", "trace_id", "xyz-789")
 	assert.Equal(t, "12345", errx.Metadata["user_id"])
 	assert.Equal(t, "xyz-789", errx.Metadata["trace_id"])
 }

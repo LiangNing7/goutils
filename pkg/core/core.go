@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"net/http"
+	"strconv"
 
 	"github.com/LiangNing7/goutils/pkg/errorsx"
 	"github.com/gin-gonic/gin"
@@ -72,6 +73,12 @@ func HandleUriRequest[T any, R any](c *gin.Context, handler Handler[T, R], valid
 // - 它负责调用绑定函数绑定请求数据.
 // - 如果目标类型实现了 Default 接口，会调用其 Default 方法设置默认值.
 // - 最后执行传入的验证器对数据进行校验.
+//
+// 注意 Default() 的调用时机：它在 binder 之后调用，且签名不接收 context.
+// 这意味着 Default() 中设置的值会**覆盖**请求中显式传入的同名字段值，
+// 并且无法根据每次请求的上下文（如登录用户、请求参数）计算默认值。
+// 因此 Default() 只应设置「请求未提供时」才有意义的固定默认值；
+// 若需要「请求优先」，请在验证器中处理，而不是依赖 Default()。
 func ReadRequest[T any](c *gin.Context, rq *T, binder Binder, validators ...Validator[T]) error {
 	// 调用绑定函数绑定请求数据
 	if err := binder(rq); err != nil {
@@ -113,18 +120,52 @@ func ShouldBindUri[T any](c *gin.Context, rq *T, validators ...Validator[T]) err
 
 // WriteResponse 是通用的响应函数.
 // 它会根据是否发生错误，生成成功响应或标准化的错误响应.
+//
+// 关于错误状态码：只有 2xx..5xx（200-599）的状态码才会被原样写回。
+// 其余状态码（0、1xx、>599）都会回退为 500，并把原始 Code 写入
+// 响应体的 metadata["original_code"] 中，便于排查。
+// 这样既避免了 Code==0 时静默返回 HTTP 200 的错误响应体，
+// 也避免了 Code 为 99/1000 时 gin/net/http 的 "invalid WriteHeader code" panic，
+// 以及 1xx 这类不能作为最终响应的状态码被写出。
 func WriteResponse(c *gin.Context, data any, err error) {
 	if err != nil {
 		// 如果发生错误，生成错误响应
 		errx := errorsx.FromError(err) // 提取错误详细信息
-		c.JSON(errx.Code, ErrorResponse{
+
+		code := errx.Code
+		resp := ErrorResponse{
 			Reason:   errx.Reason,
 			Message:  errx.Message,
 			Metadata: errx.Metadata,
-		})
+		}
+
+		if !validResponseStatus(code) {
+			resp.Metadata = withOriginalCode(errx.Metadata, code)
+			code = http.StatusInternalServerError
+		}
+
+		c.JSON(code, resp)
 		return
 	}
 
 	// 如果没有错误，返回成功响应
 	c.JSON(http.StatusOK, data)
+}
+
+// validResponseStatus 判断 code 能否作为最终的 HTTP 响应状态码.
+// 只有成功(2xx)到服务端错误(5xx)之间的状态码才能作为最终响应；
+// 0、1xx（信息响应，必须跟随一个最终响应）以及大于 599 的非标准状态码都不合法.
+func validResponseStatus(code int) bool {
+	return code >= http.StatusOK && code <= 599
+}
+
+// withOriginalCode 返回一份 metadata 副本，并写入原始状态码。
+// 这里返回副本而不是原地修改，避免污染错误对象自带的（甚至是被多个请求共享的）metadata.
+func withOriginalCode(md map[string]string, original int) map[string]string {
+	out := make(map[string]string, len(md)+1)
+	for k, v := range md {
+		out[k] = v
+	}
+	out["original_code"] = strconv.Itoa(original)
+	return out
 }

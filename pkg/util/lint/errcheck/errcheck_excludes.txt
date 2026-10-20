@@ -1,0 +1,45 @@
+// errcheck_excludes.txt — 自定义 errcheck 排除清单（newline 分隔，'//' 起始为注释行）。
+//
+// 用途：pkg/util/lint/errcheck/errcheck.go 通过 //go:embed 读取本文件，
+// 并把其中的符号追加到 errcheck.DefaultExcludedSymbols。
+//
+// 说明：errcheck v1.8.0 的 analyzer flag 名为 "exclude"（值是「文件路径」），
+// 并不存在 "excludes" flag，且它只接受路径而非文件内容；
+// 因此这里改用受支持的编程式入口 DefaultExcludedSymbols。
+//
+// 下面列出的是 errcheck 官方默认排除项（与上游保持一致，重复追加无副作用）。
+// bytes
+(*bytes.Buffer).Write
+(*bytes.Buffer).WriteByte
+(*bytes.Buffer).WriteRune
+(*bytes.Buffer).WriteString
+// fmt
+fmt.Print
+fmt.Printf
+fmt.Println
+fmt.Fprint(*bytes.Buffer)
+fmt.Fprintf(*bytes.Buffer)
+fmt.Fprintln(*bytes.Buffer)
+fmt.Fprint(*strings.Builder)
+fmt.Fprintf(*strings.Builder)
+fmt.Fprintln(*strings.Builder)
+fmt.Fprint(os.Stderr)
+fmt.Fprintf(os.Stderr)
+fmt.Fprintln(os.Stderr)
+// io
+(*io.PipeReader).CloseWithError
+(*io.PipeWriter).CloseWithError
+// math/rand
+math/rand.Read
+(*math/rand.Rand).Read
+// strings
+(*strings.Builder).Write
+(*strings.Builder).WriteByte
+(*strings.Builder).WriteRune
+(*strings.Builder).WriteString
+// hash
+(hash.Hash).Write
+// hash/maphash
+(*hash/maphash.Hash).Write
+(*hash/maphash.Hash).WriteByte
+(*hash/maphash.Hash).WriteString

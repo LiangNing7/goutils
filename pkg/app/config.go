@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
@@ -16,12 +18,20 @@ import (
 
 const configFlagName = "config"
 
+// configReloadDebounce 用来合并编辑器保存动作产生的连续文件事件.
+const configReloadDebounce = 150 * time.Millisecond
+
 var cfgFile string
 
 // AddConfigFlag adds flags for a specific server to the specified FlagSet object.
 // It also sets a passed functions to read values from configuration file into viper
 // when each cobra command's Execute method is called.
 func AddConfigFlag(fs *pflag.FlagSet, name string, watch bool) {
+	addConfigFlag(fs, name, watch, nil)
+}
+
+// addConfigFlag additionally supports safe hot reload through ConfigReloader.
+func addConfigFlag(fs *pflag.FlagSet, name string, watch bool, options any) {
 	fs.AddFlag(pflag.Lookup(configFlagName))
 
 	// Enable viper's automatic environment variable parsing. This means
@@ -56,17 +66,193 @@ func AddConfigFlag(fs *pflag.FlagSet, name string, watch bool) {
 		log.Debugw("Success to read configuration file", "file", viper.ConfigFileUsed())
 
 		if watch {
-			viper.WatchConfig()
-			viper.OnConfigChange(func(e fsnotify.Event) {
-				log.Debugw("Config file changed", "name", e.Name)
-			})
+			watchConfigWithReload(options)
 		}
 	})
 }
 
+// watchConfigWithReload 监听配置文件所在目录，在文件发生变更后重新读取配置并
+// 重新应用到 options，返回一个停止监听的函数.
+//
+// 这里没有使用 viper.WatchConfig()：viper 1.20.1 在收到目标文件的 REMOVE 事件
+// 时会直接退出其事件循环，导致 watcher 永久失效；而 macOS 上的编辑器/VSCode/
+// GoLand 保存文件采用的是「写临时文件 + rename 覆盖」的原子保存方式，会产生
+// REMOVE 事件. 目录级监听不存在这个问题，可以持续恢复.
+func watchConfigWithReload(options any) func() {
+	if _, ok := options.(ConfigReloader); !ok {
+		log.Warnw("Config watch disabled: options must implement app.ConfigReloader")
+		return func() {}
+	}
+	configFile := viper.ConfigFileUsed()
+	if configFile == "" {
+		log.Warnw("Cannot watch configuration file: no config file was loaded")
+		return func() {}
+	}
+
+	dir := filepath.Dir(configFile)
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Errorw(err, "Failed to create config file watcher")
+		return func() {}
+	}
+
+	if err := watcher.Add(dir); err != nil {
+		log.Errorw(err, "Failed to watch config directory", "dir", dir)
+		_ = watcher.Close()
+		return func() {}
+	}
+
+	stopCh := make(chan struct{})
+	exited := make(chan struct{})
+	var once sync.Once
+
+	go func() {
+		defer close(exited)
+
+		var (
+			timer  *time.Timer
+			timerC <-chan time.Time
+		)
+		defer func() {
+			if timer != nil {
+				timer.Stop()
+			}
+		}()
+
+		// 去抖：把编辑器保存产生的连续事件合并成一次重载.
+		resetTimer := func() {
+			if timer == nil {
+				timer = time.NewTimer(configReloadDebounce)
+				timerC = timer.C
+				return
+			}
+
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(configReloadDebounce)
+		}
+
+		for {
+			select {
+			case <-stopCh:
+				return
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				if !isWatchedConfigEvent(event, configFile) {
+					continue
+				}
+				resetTimer()
+			case <-timerC:
+				reloadConfig(options)
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				log.Errorw(err, "Config file watcher error")
+			}
+		}
+	}()
+
+	return func() {
+		once.Do(func() {
+			close(stopCh)
+			_ = watcher.Close()
+			// 等待监听 goroutine 退出，确保 stop 返回后不再有重载动作.
+			<-exited
+		})
+	}
+}
+
+// isWatchedConfigEvent 判断文件事件是否与目标配置文件相关.
+func isWatchedConfigEvent(event fsnotify.Event, configFile string) bool {
+	if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
+		return false
+	}
+
+	eventName := filepath.Clean(event.Name)
+	target := filepath.Clean(configFile)
+	if eventName == target {
+		return true
+	}
+
+	// 原子保存的临时文件通常以目标文件名作为前缀，例如 app.yaml.tmp.
+	return strings.HasPrefix(filepath.Base(eventName), filepath.Base(target))
+}
+
+// ConfigReloader opts into hot reload without mutating the startup options.
+// NewReloadOptions must return a fresh, independent candidate with any defaults
+// initialized. ApplyReloadOptions must publish it safely (for example through
+// an atomic pointer), and leave the current configuration intact on error.
+// Candidates are decoded from the file; startup flags are not reapplied.
+// Complete and Validate on the candidate must not mutate the active config.
+type ConfigReloader interface {
+	NewReloadOptions() any
+	ApplyReloadOptions(candidate any) error
+}
+
+func reloadConfig(options any) {
+	if err := applyConfigReload(options); err != nil {
+		log.Errorw(err, "Failed to reload configuration file")
+		return
+	}
+	log.Infow("Configuration file reloaded", "file", viper.ConfigFileUsed())
+}
+
+func applyConfigReload(options any) error {
+	reloader, ok := options.(ConfigReloader)
+	if !ok {
+		return fmt.Errorf("options must implement app.ConfigReloader to support hot reload")
+	}
+	// Keep the global Viper and startup options immutable after initialization.
+	next := viper.New()
+	next.SetConfigFile(viper.ConfigFileUsed())
+	if err := next.ReadInConfig(); err != nil {
+		return err
+	}
+	candidate := reloader.NewReloadOptions()
+	if candidate == nil {
+		return fmt.Errorf("NewReloadOptions returned nil")
+	}
+	if err := next.Unmarshal(candidate); err != nil {
+		return err
+	}
+	if complete, ok := candidate.(interface{ Complete() error }); ok {
+		if err := complete.Complete(); err != nil {
+			return err
+		}
+	}
+	if validate, ok := candidate.(interface{ Validate() error }); ok {
+		if err := validate.Validate(); err != nil {
+			return err
+		}
+	}
+	return reloader.ApplyReloadOptions(candidate)
+}
+
+// sensitiveKeyPatterns 命中这些子串的配置键在做打印时会脱敏.
+var sensitiveKeyPatterns = []string{"password", "secret", "token", "key"}
+
+// maskConfigValue 对敏感配置值做脱敏，避免密码等写入日志.
+func maskConfigValue(key string, value any) any {
+	lower := strings.ToLower(key)
+	for _, pattern := range sensitiveKeyPatterns {
+		if strings.Contains(lower, pattern) {
+			return "***"
+		}
+	}
+
+	return value
+}
+
 func PrintConfig() {
 	for _, key := range viper.AllKeys() {
-		log.Debugw(fmt.Sprintf("CFG: %s=%v", key, viper.Get(key)))
+		log.Debugw(fmt.Sprintf("CFG: %s=%v", key, maskConfigValue(key, viper.Get(key))))
 	}
 }
 

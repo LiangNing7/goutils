@@ -6,6 +6,18 @@ import (
 	"golang.org/x/text/language"
 )
 
+// 支持的语言文件格式.
+const (
+	// formatYML yaml 格式（.yml 扩展名）.
+	formatYML = "yml"
+	// formatYAML yaml 格式（.yaml 扩展名）.
+	formatYAML = "yaml"
+	// formatTOML toml 格式.
+	formatTOML = "toml"
+	// formatJSON json 格式.
+	formatJSON = "json"
+)
+
 type Options struct {
 	format   string
 	language language.Tag
@@ -46,7 +58,7 @@ func WithFS(fs embed.FS) func(*Options) {
 func getOptionsOrSetDefault(options *Options) *Options {
 	if options == nil {
 		return &Options{
-			format:   "yml",
+			format:   formatYML,
 			language: language.English,
 			files:    []string{},
 		}

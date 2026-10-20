@@ -1,3 +1,8 @@
+// Command noop demonstrates distlock.NewNoopLocker.
+//
+// NoopLocker provides no mutual exclusion across processes: it only models the
+// lifecycle locally. It is meant for tests and for wiring up an application
+// before a real backend is chosen.
 package main
 
 import (
@@ -10,10 +15,15 @@ import (
 
 func main() {
 	locker := distlock.NewNoopLocker()
+	defer func() {
+		if err := locker.Close(); err != nil {
+			fmt.Printf("failed to close locker: %v\n", err)
+		}
+	}()
 
 	ctx := context.Background()
 
-	// 持续尝试获取锁，直到成功
+	// Retry until the lock is acquired.
 	for {
 		if err := locker.Lock(ctx); err != nil {
 			fmt.Printf("failed to acquire lock: %v, retrying...\n", err)

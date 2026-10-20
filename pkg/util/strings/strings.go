@@ -4,7 +4,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/asaskevich/govalidator"
 )
@@ -12,20 +11,8 @@ import (
 type frequencyInfo struct {
 	s         string
 	frequency int
-}
-
-type frequencyInfoSlice []frequencyInfo
-
-func (fi frequencyInfoSlice) Len() int {
-	return len(fi)
-}
-
-func (fi frequencyInfoSlice) Swap(i, j int) {
-	fi[i], fi[j] = fi[j], fi[i]
-}
-
-func (fi frequencyInfoSlice) Less(i, j int) bool {
-	return fi[j].frequency > fi[i].frequency
+	// order 是该字符串在输入中首次出现的下标，用于在频次相同时提供确定性次序.
+	order int
 }
 
 // Diff 求差集，返回 base 中存在，但 exclude 中不存在的元素集合.
@@ -61,14 +48,17 @@ func Include(base, include []string) (result []string) {
 }
 
 // Unique 去重，从一个切片中去除重复元素，只保留每种字符串一次.
+//
+// 行为变更：输出顺序固定为「首次出现顺序」，不再依赖 map 迭代顺序，
+// 因此同一输入在多次运行中结果一致（旧实现顺序随机）。
 func Unique(ss []string) (result []string) {
-	// 使用哈希表去重.
+	// 使用哈希表去重，同时按首次出现顺序收集，保证输出确定性.
 	smap := make(map[string]bool)
 	for _, s := range ss {
+		if smap[s] {
+			continue
+		}
 		smap[s] = true
-	}
-	// 再把键取出来构成 result 切片.
-	for s := range smap {
 		result = append(result, s)
 	}
 	return result
@@ -100,20 +90,22 @@ func StringIn(str string, array []string) bool {
 	return FindString(array, str) > -1
 }
 
-// Reverse 用于反转字符串.
+// Reverse 按 rune 反转字符串.
+//
+// 语义：
+//   - 合法 UTF-8：按 rune 反转，多字节字符不会被拆散（"中文abc" -> "cba文中"）；
+//   - 非法 UTF-8 字节序列：Go 的 rune 解码会把非法字节规整为 U+FFFD (unicode.ReplacementChar)，
+//     因此输出是确定性的，且保证不会 panic（旧实现会对非法输入切片越界 panic）。
+//
+// 该语义适用于来自日志 / CSV / 外部协议等不可控输入。
 func Reverse(s string) string {
-	size := len(s)
-	buf := make([]byte, size)
-	// 按字节遍历但使用 utf8.DecodeRuneInString 解码出完整的 rune，及其所占字节数 n.
-	for start := 0; start < size; {
-		r, n := utf8.DecodeRuneInString(s[start:])
-		start += n
-		// 计算该字符在目标字节切片中的反向位置，用 utf8.EncodeRune 写过去.
-		utf8.EncodeRune(buf[size-start:], r)
+	// []rune 转换会把非法字节规整为 U+FFFD，随后原地反转即可.
+	runes := []rune(s)
+	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
+		runes[i], runes[j] = runes[j], runes[i]
 	}
 
-	// 用 string(buf) 返回反转后的字符串.
-	return string(buf)
+	return string(runes)
 }
 
 // Filter 从 list 中移除所有等于 strToFilter 的元素，返回过滤后的新 slice.
@@ -152,11 +144,18 @@ func ContainsEqualFold(slice []string, s string) bool {
 }
 
 // FrequencySort 将输入切片中的字符串，按出现次数从高到低排序后返回唯一的字符串列表.
+//
+// 行为变更：频次相同的元素按「首次出现顺序」排列，使输出完全确定，
+// 不再依赖 map 迭代顺序（旧实现在频次相同时顺序随机，同一输入多次运行结果不同）。
 func FrequencySort(list []string) []string {
-	// cnt 统计各字符串出现次数.
+	// cnt 统计各字符串出现次数；firstIdx 记录首次出现的下标，用于稳定排序.
 	cnt := map[string]int{}
+	firstIdx := map[string]int{}
 
-	for _, s := range list {
+	for i, s := range list {
+		if _, ok := firstIdx[s]; !ok {
+			firstIdx[s] = i
+		}
 		cnt[s]++
 	}
 
@@ -165,10 +164,17 @@ func FrequencySort(list []string) []string {
 		infos = append(infos, frequencyInfo{
 			s:         s,
 			frequency: c,
+			order:     firstIdx[s],
 		})
 	}
 
-	sort.Sort(frequencyInfoSlice(infos))
+	// 先按频次降序，频次相同时按首次出现顺序升序，保证结果确定.
+	sort.Slice(infos, func(i, j int) bool {
+		if infos[i].frequency != infos[j].frequency {
+			return infos[i].frequency > infos[j].frequency
+		}
+		return infos[i].order < infos[j].order
+	})
 
 	ret := make([]string, 0, len(infos))
 	for _, info := range infos {

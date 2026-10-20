@@ -4,17 +4,27 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"strings"
 
 	"github.com/gosuri/uitable"
 )
 
+const (
+	// gitVersionPlaceholder 是 gitVersion 的占位符默认值（由 git 的 archive 扩展或构建脚本填充）.
+	gitVersionPlaceholder = "v0.0.0-master+$Format:%h$"
+	// gitCommitPlaceholder 是 gitCommit 的占位符默认值.
+	gitCommitPlaceholder = "$Format:%H$"
+	// formatPlaceholderTag 是占位符的公共前缀，用于判断版本信息是否已被 -ldflags 注入.
+	formatPlaceholderTag = "$Format:"
+)
+
 var (
 	// gitVersion 是语义化的版本号.
-	gitVersion = "v0.0.0-master+$Format:%h$"
+	gitVersion = gitVersionPlaceholder
 	// buildDate 是 ISO8601 格式的构建时间, $(date -u +'%Y-%m-%dT%H:%M:%SZ') 命令的输出.
 	buildDate = "1970-01-01T00:00:00Z"
 	// gitCommit 是 Git 的 SHA1 值，$(git rev-parse HEAD) 命令的输出.
-	gitCommit = "$Format:%H$"
+	gitCommit = gitCommitPlaceholder
 	// gitTreeState 代表构建时 Git 仓库的状态，可能的值有：clean, dirty.
 	gitTreeState = ""
 )
@@ -63,12 +73,26 @@ func (info Info) Text() string {
 func Get() Info {
 	// 以下变量通常由 -ldflags 进行设置
 	return Info{
-		GitVersion:   gitVersion,
-		GitCommit:    gitCommit,
+		// GitVersion 优先使用运行期设置的动态版本（SetDynamicVersion）.
+		GitVersion:   dynamicVersion(),
+		GitCommit:    currentGitCommit(),
 		GitTreeState: gitTreeState,
 		BuildDate:    buildDate,
 		GoVersion:    runtime.Version(),
 		Compiler:     runtime.Compiler,
 		Platform:     fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
 	}
+}
+
+// currentGitCommit 返回当前生效的 commit：
+// 若 gitCommit 仍是未被 -ldflags 注入的占位符，则使用动态版本中携带的 commit 信息.
+func currentGitCommit() string {
+	if !strings.Contains(gitCommit, formatPlaceholderTag) {
+		// 已被 -ldflags 注入真实 commit，直接使用
+		return gitCommit
+	}
+	if commit := dynamicCommit(); commit != "" && !strings.Contains(commit, formatPlaceholderTag) {
+		return commit
+	}
+	return gitCommit
 }

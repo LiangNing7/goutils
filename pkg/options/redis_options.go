@@ -16,7 +16,7 @@ var _ IOptions = (*RedisOptions)(nil)
 type RedisOptions struct {
 	Addr         string        `json:"addr" mapstructure:"addr"`
 	Username     string        `json:"username" mapstructure:"username"`
-	Password     string        `json:"password" mapstructure:"password"`
+	Password     string        `json:"-" mapstructure:"password"`
 	Database     int           `json:"database" mapstructure:"database"`
 	MaxRetries   int           `json:"max-retries" mapstructure:"max-retries"`
 	MinIdleConns int           `json:"min-idle-conns" mapstructure:"min-idle-conns"`
