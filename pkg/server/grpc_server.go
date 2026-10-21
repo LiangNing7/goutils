@@ -78,10 +78,10 @@ func (s *GRPCServer) GracefulStop(ctx context.Context) {
 	case <-stopped:
 	case <-ctx.Done():
 		log.Warnw("Graceful stop timed out, forcing grpc server to stop", "err", ctx.Err())
-		// 先触发强制停止：它会立即关闭监听和连接，让客户端尽快感知到断开.
-		// 这里不再等待 GracefulStop 返回——对于不响应 ctx 的流式 handler，
-		// 连接要等 handler 退出后才会从连接表移除，等待会让进程无法退出.
-		s.srv.Stop()
+		// Stop 与 GracefulStop 共享内部锁；GracefulStop 等待不响应取消的
+		// handler 时也可能阻塞 Stop。因此异步触发强制停止，避免再次超出
+		// ctx 的截止时间；底层停止流程在 handler 退出后自行完成。
+		go s.srv.Stop()
 	}
 }
 
