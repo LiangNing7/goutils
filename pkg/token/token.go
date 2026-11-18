@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -64,10 +65,31 @@ func Parse(tokenString string, key string) (string, error) {
 	return parse(tokenString, key, configSnapshot().identityKey)
 }
 
+// ParseWithKey 使用指定的密钥 key 解析 token，解析成功返回 token 的完整 claims.
+// 与 Parse 一致：密钥不能为空，签名算法必须是 HMAC，且 exp 必须存在.
+func ParseWithKey(tokenString, key string) (jwt.MapClaims, error) {
+	return parseClaims(tokenString, key)
+}
+
 func parse(tokenString, key, identityClaim string) (string, error) {
+	claims, err := parseClaims(tokenString, key)
+	if err != nil {
+		return "", err
+	}
+
+	// 从 token 中取出 token 的主题
+	identityKey, valid := claims[identityClaim].(string)
+	if !valid || identityKey == "" {
+		return "", jwt.ErrSignatureInvalid
+	}
+
+	return identityKey, nil
+}
+
+func parseClaims(tokenString, key string) (jwt.MapClaims, error) {
 	// 没有密钥时不使用空密钥去验签，直接报错.
 	if key == "" {
-		return "", ErrKeyNotInitialized
+		return nil, ErrKeyNotInitialized
 	}
 
 	// 解析 token
@@ -81,27 +103,21 @@ func parse(tokenString, key, identityClaim string) (string, error) {
 	})
 	// 解析失败
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok || !token.Valid {
-		return "", jwt.ErrSignatureInvalid
+		return nil, jwt.ErrSignatureInvalid
 	}
 
 	// jwt/v4 只校验「存在且已过期」的 exp，缺失 exp 时不会报错，
 	// 因此这里显式要求 exp 存在.
 	if _, exists := claims["exp"]; !exists {
-		return "", ErrMissingExpiration
+		return nil, ErrMissingExpiration
 	}
 
-	// 从 token 中取出 token 的主题
-	identityKey, valid := claims[identityClaim].(string)
-	if !valid || identityKey == "" {
-		return "", jwt.ErrSignatureInvalid
-	}
-
-	return identityKey, nil
+	return claims, nil
 }
 
 // ParseRequest 从请求头中获取令牌，并将其传递给 Parse 函数以解析令牌.
@@ -164,6 +180,48 @@ func Sign(identityKey string) (string, time.Time, error) {
 	tokenString, err := token.SignedString([]byte(config.key))
 	if err != nil {
 		return "", time.Time{}, err
+	}
+
+	return tokenString, expireAt, nil // 返回 token 字符串、过期时间和错误
+}
+
+// SignWithClaims 使用包级别的密钥签发携带自定义 claims 的 token.
+// 调用方未提供 nbf、iat、exp 时会自动补全，提供的值保持不变.
+func SignWithClaims(customClaims jwt.MapClaims) (string, time.Time, error) {
+	config := configSnapshot()
+	// 未注入密钥时不允许签发 token.
+	if config.key == "" {
+		return "", time.Time{}, ErrKeyNotInitialized
+	}
+
+	now := time.Now()
+	expireAt := now.Add(config.expiration)
+
+	// 复制自定义 claims，避免修改调用方传入的 map.
+	claims := make(jwt.MapClaims, len(customClaims)+3)
+	maps.Copy(claims, customClaims)
+	// 补全必要的时间字段.
+	if _, exists := claims["nbf"]; !exists {
+		claims["nbf"] = now.Unix()
+	}
+	if _, exists := claims["iat"]; !exists {
+		claims["iat"] = now.Unix()
+	}
+	if _, exists := claims["exp"]; !exists {
+		claims["exp"] = expireAt.Unix()
+	}
+	// 返回实际写入 token 的过期时间，而不是配置的默认值.
+	switch value := claims["exp"].(type) {
+	case int64:
+		expireAt = time.Unix(value, 0)
+	case float64:
+		expireAt = time.Unix(int64(value), 0)
+	}
+
+	// 签发 token
+	tokenString, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(config.key))
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("failed to sign token: %w", err)
 	}
 
 	return tokenString, expireAt, nil // 返回 token 字符串、过期时间和错误
